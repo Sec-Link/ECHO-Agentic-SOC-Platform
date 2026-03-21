@@ -4,6 +4,13 @@ frontend/node_modules/
 # Build output
 frontend/dist/
 frontend/build/
+frontend/.next/
+frontend/.next.bak-*/
+frontend/out/
+frontend/.turbo/
+frontend/.next-dev.log
+frontend/legacy-spa/dist/
+frontend/legacy-spa/node_modules/
 
 # Logs
 logs/

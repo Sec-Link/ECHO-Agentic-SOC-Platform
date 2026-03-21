@@ -20,11 +20,16 @@ services:
       context: frontend
     container_name: frontend
     ports:
-      - "3000:80"            # 浏览器访问
+      - "3000:3000"          # 浏览器访问
+    env_file:
+      - .env
     depends_on:
       - backend
-    volumes:
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+ #   volumes:
+ #     - ./frontend:/app
+ #     - /app/node_modules
+      # removed anonymous mount for /app/.next to preserve build outputs from image
+ #   command: ["npm", "run", "dev"]
     restart: unless-stopped
 
   db:
