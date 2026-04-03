@@ -14,7 +14,6 @@ COMMON_APP_LABELS = {
     "dashboards",
     "datasource",
     "orchestrator",
-    "users",
     "correlation",
 }
 

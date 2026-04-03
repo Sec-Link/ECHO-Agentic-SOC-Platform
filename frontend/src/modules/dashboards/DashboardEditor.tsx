@@ -11,7 +11,6 @@ import { listDatasources } from 'services/datasource'
 import Panel from './Panel'
 import PanelConfigModal from './PanelConfigModal'
 import { Column, Bar, Line, Pie, Scatter } from '@ant-design/charts'
-import { MitreAttackHeatmap } from '../../chartTypes'
 import { Table } from 'antd'
 
 // DashboardEditor provides a visual layout editor that supports:
@@ -388,17 +387,6 @@ export default function DashboardEditor({ dashboardId, onBack }:{ dashboardId?:s
                                 case 'column':
                                 default:
                                   return <Column data={data} xField={bindings.xField || detectedX} yField={bindings.yField || 'value'} height={size.height} width={size.width} />
-                                  case 'mitre-attack-heatmap':
-                                    // build aggRows from runtimeData using configured field bindings
-                                    try{
-                                      const techField = bindings.techniqueField || 'technique_id' || 'technique'
-                                      const cntField = bindings.countField || 'count' || 'value'
-                                      const aggRows = Array.isArray(data) ? data.map((r:any)=> ({ technique_id: r[techField] ?? r['technique_id'] ?? r['technique'], count: Number(r[cntField] ?? r['count'] ?? r['value'] ?? 0) })) : []
-                                      const displayMode = p.config?.mitreDisplay || 'name'
-                                      return <MitreAttackHeatmap aggRows={aggRows} displayMode={displayMode} />
-                                    }catch(e){
-                                      return <MitreAttackHeatmap aggRows={[]} />
-                                    }
                               }
                             }catch(e){
                               // fallback to basic column

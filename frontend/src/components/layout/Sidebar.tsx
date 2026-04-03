@@ -119,7 +119,7 @@ export default function Sidebar({
       key: 'dataPlatformGroup',
       title: 'Data & Platform',
       icon: <AppstoreOutlined />,
-      items: ['integrations', 'datasources', 'dashboards'],
+      items: ['integrations', 'datasources'],
     },
     {
       key: 'automationGroup',
