@@ -17,6 +17,13 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 from accounts.views import LoginAPIView, LogoutAPIView, RegisterAPIView
+from integrations.views import test_es_connection
+from integrations.views import IntegrationViewSet, preview_es_index
+from integrations.views import integrations_db_tables, integrations_create_table, integrations_create_table_from_es, integrations_preview_es_mapping
+from rest_framework import routers
+
+router = routers.DefaultRouter()
+router.register(r'integrations', IntegrationViewSet, basename='integration')
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -27,5 +34,12 @@ urlpatterns = [
     path('api/v1/auth/register/', RegisterAPIView.as_view(), name='register'),
     path('api/v1/auth/register', RegisterAPIView.as_view()),
     path('api/v1/accounts/', include('accounts.urls')),
-    path('api/v1/permissions/', include('accounts.urls_permissions')),
+    path('api/v1/permissions/', include('accounts.urls_permissions')),  
+    path('api/v1/', include(router.urls)),  
+    path('api/v1/integrations/test_es', test_es_connection),
+    path('api/v1/integrations/preview_es', preview_es_index),
+    path('api/v1/integrations/db_tables', integrations_db_tables),
+    path('api/v1/integrations/create_table', integrations_create_table),
+    path('api/v1/integrations/create_table_from_es', integrations_create_table_from_es),
+    path('api/v1/integrations/preview_es_mapping', integrations_preview_es_mapping),
 ]
