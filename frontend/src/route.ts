@@ -1,4 +1,4 @@
-export type RouteKey =
+﻿export type RouteKey =
   | 'dashboard'
   | 'alerts'
   | 'tickets'
@@ -17,7 +17,7 @@ export type RouteKey =
 
 export const permissionByKey: Record<RouteKey, string | undefined> = {
   dashboard: undefined,
-  alerts: 'es_integration.view_alert',
+  alerts: 'alerts.view_alert',
   tickets: 'tickets.view_eventticket',
   assets: 'cmdb.view_asset',
   integrations: 'integrations.view_integration',
@@ -91,3 +91,4 @@ export function resolveRouteKey(pathname: string): { key: RouteKey; ticketNumber
 
   return { key: 'dashboard' };
 }
+

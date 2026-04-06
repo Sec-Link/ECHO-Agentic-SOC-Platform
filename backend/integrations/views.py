@@ -1,4 +1,4 @@
-import json
+﻿import json
 import requests
 from urllib.parse import quote_plus
 from django.conf import settings
@@ -59,17 +59,17 @@ def _deny_if_no_perm(request, perm):
         return None
     return Response({"detail": "Permission denied."}, status=rf_status.HTTP_403_FORBIDDEN)
 # -----------------------------
-# 中文注释（文件级别说明）
+# 涓枃娉ㄩ噴锛堟枃浠剁骇鍒鏄庯級
 #
-# 该文件包含 Integrations 相关的视图函数和工具方法，主要职责包括：
-# - 提供 Integration 的测试接口（IntegrationViewSet.test）用于检查外部服务连通性（例如 Elasticsearch）
-# - 从 Elasticsearch 抓取数据并同步到目标数据库（sync_es_to_db），支持 PostgreSQL、MySQL 和通过 Django settings 的 DB 连接
-# - 提供预览 ES 索引样本（preview_es_index）用于在创建表或推断映射之前查看示例文档
-# - 提供查询目标数据库表列表的接口（integrations_db_tables）
-# - 提供按 ES 映射创建目标表的接口（integrations_create_table_from_es / integrations_create_table）
-# - 提供返回 ES 映射推断列信息的接口（integrations_preview_es_mapping），前端会使用该接口让用户编辑列名和 SQL 类型
+# 璇ユ枃浠跺寘鍚?Integrations 鐩稿叧鐨勮鍥惧嚱鏁板拰宸ュ叿鏂规硶锛屼富瑕佽亴璐ｅ寘鎷細
+# - 鎻愪緵 Integration 鐨勬祴璇曟帴鍙ｏ紙IntegrationViewSet.test锛夌敤浜庢鏌ュ閮ㄦ湇鍔¤繛閫氭€э紙渚嬪 Elasticsearch锛?
+# - 浠?Elasticsearch 鎶撳彇鏁版嵁骞跺悓姝ュ埌鐩爣鏁版嵁搴擄紙sync_es_to_db锛夛紝鏀寔 PostgreSQL銆丮ySQL 鍜岄€氳繃 Django settings 鐨?DB 杩炴帴
+# - 鎻愪緵棰勮 ES 绱㈠紩鏍锋湰锛坧review_es_index锛夌敤浜庡湪鍒涘缓琛ㄦ垨鎺ㄦ柇鏄犲皠涔嬪墠鏌ョ湅绀轰緥鏂囨。
+# - 鎻愪緵鏌ヨ鐩爣鏁版嵁搴撹〃鍒楄〃鐨勬帴鍙ｏ紙integrations_db_tables锛?
+# - 鎻愪緵鎸?ES 鏄犲皠鍒涘缓鐩爣琛ㄧ殑鎺ュ彛锛坕ntegrations_create_table_from_es / integrations_create_table锛?
+# - 鎻愪緵杩斿洖 ES 鏄犲皠鎺ㄦ柇鍒椾俊鎭殑鎺ュ彛锛坕ntegrations_preview_es_mapping锛夛紝鍓嶇浼氫娇鐢ㄨ鎺ュ彛璁╃敤鎴风紪杈戝垪鍚嶅拰 SQL 绫诲瀷
 #
-# 注意：本文件中新增的注释仅用于说明代码逻辑，未对现有行为做出修改。请在运行时确保 Python 环境包含 requests/psycopg2/pymysql 等依赖以便完整功能可用。
+# 娉ㄦ剰锛氭湰鏂囦欢涓柊澧炵殑娉ㄩ噴浠呯敤浜庤鏄庝唬鐮侀€昏緫锛屾湭瀵圭幇鏈夎涓哄仛鍑轰慨鏀广€傝鍦ㄨ繍琛屾椂纭繚 Python 鐜鍖呭惈 requests/psycopg2/pymysql 绛変緷璧栦互渚垮畬鏁村姛鑳藉彲鐢ㄣ€?
 # -----------------------------
 
 
@@ -97,10 +97,10 @@ class IntegrationViewSet(viewsets.ModelViewSet):
 
 
 # Helper: sync documents from ES index to a destination DB using integration configs
-def sync_es_to_db(es_integration: Integration, index: str, dest_integration: Integration, query: dict = None, limit: int = 1000):
+def sync_es_to_db(alerts: Integration, index: str, dest_integration: Integration, query: dict = None, limit: int = 1000):
     # returns dict with status, imported_count and sample errors
     try:
-        es_cfg = es_integration.config or {}
+        es_cfg = alerts.config or {}
         dest_cfg = dest_integration.config or {}
         host = es_cfg.get('host')
         auth = None
@@ -830,7 +830,7 @@ def integrations_create_table_from_es(request):
         return denied
     """Create table using an Elasticsearch index mapping from an existing ES Integration.
     POST payload accepts:
-      - es_integration: id of an Integration of type 'elasticsearch'
+      - alerts: id of an Integration of type 'elasticsearch'
       - index: the ES index name to read mapping from
       - table: target table name to create
       - optional connection fields as in integrations_create_table (db_type/conn_str/host/user/password/database/port/django_db)
@@ -841,11 +841,11 @@ def integrations_create_table_from_es(request):
             data = dict(raw)
         except Exception:
             data = raw
-        es_iid = data.get('es_integration') or data.get('es_integration_id')
+        es_iid = data.get('alerts') or data.get('alerts_id')
         index = data.get('index')
         table = data.get('table')
         if not es_iid or not index or not table:
-            return Response({'error': 'es_integration, index and table are required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'alerts, index and table are required'}, status=status.HTTP_400_BAD_REQUEST)
 
         # load ES integration
         try:
@@ -1301,15 +1301,15 @@ def integrations_preview_es_mapping(request):
     if denied:
         return denied
     """Preview Elasticsearch index mapping and return inferred columns without creating a table.
-    POST payload: { es_integration: id, index: name, db_type?: 'postgres'|'mysql', conn_str?, host?, user?, password?, database?, port?, django_db? }
+    POST payload: { alerts: id, index: name, db_type?: 'postgres'|'mysql', conn_str?, host?, user?, password?, database?, port?, django_db? }
     Response: { ok: True, columns: [{ orig_name, colname, es_type, sql_type, sample }] }
     """
     try:
         data = request.data if hasattr(request, 'data') else {}
-        es_iid = data.get('es_integration') or data.get('es_integration_id')
+        es_iid = data.get('alerts') or data.get('alerts_id')
         index = data.get('index')
         if not es_iid or not index:
-            return Response({'error': 'es_integration and index are required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'alerts and index are required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             es_it = Integration.objects.get(id=es_iid)
@@ -1540,3 +1540,4 @@ def integrations_preview_es_mapping(request):
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
  
+

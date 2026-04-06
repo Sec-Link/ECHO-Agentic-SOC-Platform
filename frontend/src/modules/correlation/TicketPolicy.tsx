@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Form, Input, List, Modal, Select, Space, Tag, message, Divider, Typography } from 'antd';
 import { createTicketPolicy, deleteTicketPolicy, fetchTicketPolicies, updateTicketPolicy } from 'services/ticketPolicies';
 import { listIntegrations, integrationsPreviewEsMapping } from 'services/integrations';
@@ -109,7 +109,7 @@ export default function TicketPolicyPage({ embedded = false }: { embedded?: bool
     form.setFieldsValue({
       name: policy.name,
       policy_type: policy.policy_type,
-      es_integration_id: content.es_source?.integration_id,
+      alerts_id: content.es_source?.integration_id,
       es_index: content.es_source?.index,
     });
     applyConditionsToState(content.conditions);
@@ -136,15 +136,15 @@ export default function TicketPolicyPage({ embedded = false }: { embedded?: bool
   };
 
   const loadEsFields = async () => {
-    const values = form.getFieldsValue(['es_integration_id', 'es_index']);
-    if (!values.es_integration_id || !values.es_index) {
+    const values = form.getFieldsValue(['alerts_id', 'es_index']);
+    if (!values.alerts_id || !values.es_index) {
       message.error('Select ES integration and index first');
       return;
     }
     setLoadingFields(true);
     try {
       const res = await integrationsPreviewEsMapping({
-        es_integration: values.es_integration_id,
+        alerts: values.alerts_id,
         index: values.es_index,
         size: 1,
       });
@@ -212,7 +212,7 @@ export default function TicketPolicyPage({ embedded = false }: { embedded?: bool
         content: {
           conditions,
           es_source: {
-            integration_id: values.es_integration_id || null,
+            integration_id: values.alerts_id || null,
             index: values.es_index || null,
           },
         },
@@ -286,7 +286,7 @@ export default function TicketPolicyPage({ embedded = false }: { embedded?: bool
               disabled
             />
           </Form.Item>
-          <Form.Item name="es_integration_id" label="ES Integration">
+          <Form.Item name="alerts_id" label="ES Integration">
             <Select
               allowClear
               placeholder="Select integration"
@@ -374,3 +374,4 @@ export default function TicketPolicyPage({ embedded = false }: { embedded?: bool
     </div>
   );
 }
+

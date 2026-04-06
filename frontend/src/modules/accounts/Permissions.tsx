@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+﻿import React, { useEffect, useMemo, useState } from 'react'
 import { Card, Col, Row, Select, Space, Tabs, Transfer, Button, message, Tag, Tooltip, Popconfirm, Badge, Input, Modal, List, Typography, Switch, Divider } from 'antd'
 import { PlusCircleOutlined, DeleteOutlined, FilterOutlined } from '@ant-design/icons'
 import { createGroup, createUser, deleteGroup, deleteUser, getGroupPermissions, getUserGroups, getUserPermissions, listGroups, listPermissions, listUsers, resetUserPassword, updateGroup, updateGroupPermissions, updateUser, updateUserGroups, updateUserPermissions } from 'services/accounts'
@@ -198,7 +198,7 @@ const Permissions: React.FC = () => {
       tickets: 'Tickets',
       dashboards: 'Dashboards',
       integrations: 'Integrations',
-      es_integration: 'Alerts',
+      alerts: 'Alerts',
       datasource: 'Data Sources',
       orchestrator: 'Orchestrator',
       correlation: 'Correlation',
@@ -1223,3 +1223,4 @@ const Permissions: React.FC = () => {
 }
 
 export default Permissions
+

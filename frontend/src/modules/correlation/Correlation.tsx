@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+﻿import React, { useEffect, useMemo, useState } from 'react'
 import { Card, Form, InputNumber, Select, Switch, Button, Space, message, Table, Tag, Divider, Typography, Input, Tabs } from 'antd'
 import { Line } from '@ant-design/plots'
 import { getCorrelationPolicy, saveCorrelationPolicy, getCorrelationEvents } from 'services/correlation'
@@ -68,7 +68,7 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
           enabled: res.enabled,
           window_minutes: windowMinutes,
           order_by: orderBy,
-          es_integration_id: esSource.integration_id ?? null,
+          alerts_id: esSource.integration_id ?? null,
           es_index: esSource.index ?? null,
         })
       })
@@ -77,7 +77,7 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
           enabled: defaultPolicy.enabled,
           window_minutes: defaultPolicy.window_minutes,
           order_by: defaultPolicy.rules_expression.order_by,
-          es_integration_id: defaultPolicy.rules_expression.es_source.integration_id,
+          alerts_id: defaultPolicy.rules_expression.es_source.integration_id,
           es_index: defaultPolicy.rules_expression.es_source.index,
         })
       })
@@ -97,15 +97,15 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
   }, [])
 
   const loadEsFields = async () => {
-    const values = form.getFieldsValue(['es_integration_id', 'es_index'])
-    if (!values.es_integration_id || !values.es_index) {
+    const values = form.getFieldsValue(['alerts_id', 'es_index'])
+    if (!values.alerts_id || !values.es_index) {
       message.error('Select ES integration and index first')
       return
     }
     setLoadingFields(true)
     try {
       const res = await integrationsPreviewEsMapping({
-        es_integration: values.es_integration_id,
+        alerts: values.alerts_id,
         index: values.es_index,
         size: 1,
       })
@@ -164,7 +164,7 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
           window_minutes: values.window_minutes,
           order_by: orderBy,
           es_source: {
-            integration_id: values.es_integration_id || null,
+            integration_id: values.alerts_id || null,
             index: values.es_index || null,
           },
         },
@@ -223,7 +223,7 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
                   <Form.Item label="Window (minutes)" name="window_minutes" rules={[{ required: true, message: "Window minutes required" }]}>
                     <InputNumber min={1} max={1440} style={{ width: 200 }} />
                   </Form.Item>
-                  <Form.Item name="es_integration_id" label="ES Integration">
+                  <Form.Item name="alerts_id" label="ES Integration">
                     <Select
                       allowClear
                       placeholder="Select integration"
@@ -291,3 +291,4 @@ const Correlation: React.FC<Props> = ({ onNavigate }) => {
 }
 
 export default Correlation
+
