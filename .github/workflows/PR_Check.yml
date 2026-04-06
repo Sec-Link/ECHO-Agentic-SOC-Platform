@@ -6,9 +6,6 @@ on:
 
 jobs:
   security-checks:
-    strategy:
-      matrix:
-        check: [gitleaks, semgrep, bandit, npm-audit]
     name: Security Scan & Report
     runs-on: ubuntu-latest
     permissions:
