@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+﻿import React, { useEffect, useState } from 'react'
 import { List, Button, Modal, Form, Input, Card, Space, Tag, message, Select, Divider } from 'antd'
 import {
   integrationsDbTables,
@@ -235,7 +235,7 @@ const Integrations: React.FC = () =>{
         payload.port = v.port || ''
         payload.django_db = v.django_db || undefined
       }
-      if(esIntegrationId) payload.es_integration = esIntegrationId
+      if(esIntegrationId) payload.alerts = esIntegrationId
       if(indexName) payload.index = indexName
       // ask backend to persist mapping file for this create-from-es action
       try{
@@ -466,3 +466,4 @@ const Integrations: React.FC = () =>{
   )
 }
 export default Integrations;
+

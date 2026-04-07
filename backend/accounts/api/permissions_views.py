@@ -1,4 +1,4 @@
-from django.contrib.auth.models import Group, Permission, User
+﻿from django.contrib.auth.models import Group, Permission, User
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,7 +15,7 @@ COMMON_APP_LABELS = {
     'tickets',
     'accounts',
     'integrations',
-    'es_integration',
+    'alerts',
     'dashboards',
     'datasource',
     'orchestrator',
@@ -156,4 +156,5 @@ class UserGroupsAPIView(APIView):
 
         user.groups.set(groups)
         return Response({'detail': 'User groups updated.', 'user_id': user.id})
+
 

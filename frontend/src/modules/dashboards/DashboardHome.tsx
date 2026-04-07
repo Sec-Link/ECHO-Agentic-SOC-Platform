@@ -248,6 +248,7 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     if (!esModalVisible) return;
     const cfg = esConfig || {};
+    const schedule = cfg.schedule || {};
     esForm.setFieldsValue({
       enabled: !!cfg.enabled,
       hosts: cfg.hosts || '',
@@ -256,6 +257,10 @@ const Dashboard: React.FC = () => {
       password: '',
       use_ssl: !!cfg.use_ssl,
       verify_certs: cfg.verify_certs !== false,
+      auto_sync: !!schedule.enabled,
+      interval_seconds: Number(schedule.interval_seconds || 300),
+      batch_size: Number(schedule.batch_size || 500),
+      fetch_all: !!schedule.fetch_all,
     });
     setSelectedHistoryId(null);
   }, [esModalVisible, esConfig, esForm]);
@@ -289,6 +294,16 @@ const Dashboard: React.FC = () => {
       const payload = { ...values } as any;
       if (selectedHistoryId) payload.history_id = selectedHistoryId;
       if (!String(payload.password || '').trim()) delete payload.password;
+      payload.schedule = {
+        enabled: !!payload.auto_sync,
+        interval_seconds: Number(payload.interval_seconds || 300),
+        batch_size: Number(payload.batch_size || 500),
+        fetch_all: !!payload.fetch_all,
+      };
+      delete payload.auto_sync;
+      delete payload.interval_seconds;
+      delete payload.batch_size;
+      delete payload.fetch_all;
       const res = await setESConfig(payload);
       setEsConfigState(res);
       const sync = (res as any)?.sync;
@@ -811,6 +826,18 @@ const Dashboard: React.FC = () => {
             <Switch />
           </Form.Item>
           <Form.Item name="verify_certs" valuePropName="checked" label="Verify Certs">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="auto_sync" valuePropName="checked" label="Auto Sync">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="interval_seconds" label="Sync Interval (s)">
+            <Input type="number" min={10} />
+          </Form.Item>
+          <Form.Item name="batch_size" label="Batch Size">
+            <Input type="number" min={1} />
+          </Form.Item>
+          <Form.Item name="fetch_all" valuePropName="checked" label="Fetch All">
             <Switch />
           </Form.Item>
           <Form.Item>

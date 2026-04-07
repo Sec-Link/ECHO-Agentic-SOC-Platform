@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+﻿import React, { useEffect, useMemo, useState } from 'react'
 import dayjs from 'dayjs'
 import { Card, Button, List, Modal, Form, Input, Select, message, InputNumber, DatePicker, Table } from 'antd'
 import client from 'services/client'
@@ -274,7 +274,7 @@ export default function Orchestrator(){
       if(!esIntegrationId) esIntegrationId = v.source_integration
       if(!indexName) indexName = v.index
       const payload: any = { table: creatingTableName }
-      if(esIntegrationId) payload.es_integration = esIntegrationId
+      if(esIntegrationId) payload.alerts = esIntegrationId
       if(indexName) payload.index = indexName
       if(v.dest_integration) payload.dest_integration = v.dest_integration
       payload.save_to_file = true
@@ -451,10 +451,10 @@ export default function Orchestrator(){
                 try{
                   // use New Task form values for integration/index/time range
                   const v = form.getFieldsValue()
-                  const es_integration = v.source_integration
+                  const alerts = v.source_integration
                   const index_name = v.index
-                  if(!es_integration || !index_name){ message.warning('Select ES integration and index to preview'); return }
-                  const payload:any = { es_integration: es_integration, index: index_name }
+                  if(!alerts || !index_name){ message.warning('Select ES integration and index to preview'); return }
+                  const payload:any = { alerts: alerts, index: index_name }
                   if(v.dest_integration) payload.dest_integration = v.dest_integration
                   // build optional time range query from form
                   const range = computeTsRange(v)
@@ -471,7 +471,7 @@ export default function Orchestrator(){
                     payload.size = 1
                   }
                   // request preview and ask backend to save file
-                  const suggestedName = `preview_${es_integration || 'es'}_${(index_name || 'index')}.json`
+                  const suggestedName = `preview_${alerts || 'es'}_${(index_name || 'index')}.json`
                   payload.save_to_file = true
                   payload.filename = suggestedName
                   const res = await integrationsPreviewEsMapping(payload)
@@ -706,3 +706,4 @@ export default function Orchestrator(){
     </div>
   )
 }
+

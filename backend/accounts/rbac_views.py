@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from django.contrib.auth.models import Permission
 from django.http import JsonResponse
@@ -10,7 +10,7 @@ COMMON_APP_LABELS = {
     "tickets",
     "accounts",
     "integrations",
-    "es_integration",
+    "alerts",
     "dashboards",
     "datasource",
     "orchestrator",
@@ -66,3 +66,4 @@ class AppPermissionMatrixAPIView(APIView):
                 }
             )
         return JsonResponse({"apps": data})
+
