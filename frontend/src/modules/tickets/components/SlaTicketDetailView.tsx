@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import dayjs from 'dayjs';
 import { Button, Card, Checkbox, Col, Descriptions, Divider, Empty, Form, Input, List, Modal, Row, Select, Space, Table, Tabs, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { SlaTicketAttachment, SlaTicketDetail, SlaTicketHandleLog, SlaTicketLabel, SlaTicketWorkLog } from 'types';
@@ -41,6 +42,12 @@ const renderStatusTag = (s?: string) => {
 };
 
 const maybe = (v: any) => (v === undefined || v === null || v === '' ? undefined : v);
+
+const formatTimestamp = (value?: string | null) => {
+  if (!value) return '';
+  const dt = dayjs(value);
+  return dt.isValid() ? dt.format('YYYY-MM-DD HH:mm:ss') : String(value);
+};
 
 const fixMojibake = (value: string) => {
   const text = String(value || '');
@@ -911,8 +918,8 @@ export default function SlaTicketDetailView(props: Props) {
       { label: 'SIEM Event ID', value: ticket.event_siem_id },
       { label: 'Status', value: renderStatusTag(ticket.status) },
       { label: 'Priority', value: renderSeverityTag(ticket.priority) },
-      { label: 'Created', value: ticket.created_time },
-      { label: 'Updated', value: ticket.updated_time },
+      { label: 'Created', value: formatTimestamp(ticket.created_time) },
+      { label: 'Updated', value: formatTimestamp(ticket.updated_time) },
     ];
     return rows.filter(r => showEmpty || maybe(r.value) !== undefined);
   }, [showEmpty, ticket]);

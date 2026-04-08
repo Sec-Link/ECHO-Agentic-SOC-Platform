@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Button, Tabs, message } from 'antd';
+import { App, Button, Tabs } from 'antd';
 import { addSlaTicketWorklog, fetchSlaTicket, fetchSlaTicketAttachments, fetchSlaTicketTimeline, fetchSlaTickets, updateSlaTicketStatus, uploadSlaTicketAttachment } from 'services/tickets';
 import type { SlaTicketAttachment, SlaTicketDetail, SlaTicketListItem, SlaTicketWorkLog } from '../../types';
 import SlaTicketDetailView from './components/SlaTicketDetailView';
@@ -11,6 +11,7 @@ type Props = {
 };
 
 const TicketsPage: React.FC<Props> = ({ initialTicketNumber, onNavigate }) => {
+  const { message } = App.useApp();
   const [slaTickets, setSlaTickets] = useState<SlaTicketListItem[]>([]);
   const [slaLoading, setSlaLoading] = useState(false);
   const [slaDetailOpen, setSlaDetailOpen] = useState(false);
