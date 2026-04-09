@@ -50,8 +50,23 @@ INSTALLED_APPS = [
     'tickets',
     'ai_assistant',
     'orchestrator',
+    'workflows',
+    'workflow_interfaces',
     'django_scheduled_tasks',
 ]
+
+# ---------------------------------------------------------------------------
+# Django 6.0 Background Tasks
+# Uses ImmediateBackend: tasks run in-process as soon as .enqueue() is called.
+# To run tasks truly asynchronously, switch BACKEND to a third-party backend
+# (e.g. django-tasks-celery) that supports a separate worker process.
+# ---------------------------------------------------------------------------
+TASKS = {
+    "default": {
+        "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+    }
+}
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

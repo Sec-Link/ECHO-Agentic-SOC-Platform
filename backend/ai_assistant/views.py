@@ -56,7 +56,7 @@ def _fix_mojibake(value: str) -> str:
         return repaired
     return text
 
-def _fix_mojibake_in_obj(value: Any) -> Any:
+def _fix_mojibake_in_obj(value: any) -> any:
     if isinstance(value, str):
         return _fix_mojibake(value)
     if isinstance(value, list):

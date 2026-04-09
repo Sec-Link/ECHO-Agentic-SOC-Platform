@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
+  App,
   Card,
   Table,
   Button,
@@ -10,7 +11,6 @@ import {
   Row,
   Col,
   Statistic,
-  message,
   Modal,
   Popconfirm,
   Tooltip,
@@ -61,6 +61,7 @@ const statusColors: Record<string, string> = {
 };
 
 const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow }) => {
+  const { message } = App.useApp();
   const [modal, modalContextHolder] = Modal.useModal();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -277,9 +278,7 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
             okText="Yes"
             cancelText="No"
           >
-            <Tooltip title="Delete">
-              <Button size="small" danger icon={<DeleteOutlined />} />
-            </Tooltip>
+            <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>
       ),

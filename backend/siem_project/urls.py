@@ -71,6 +71,8 @@ urlpatterns = [
     path('api/v1/integrations/preview_es_mapping', integrations_preview_es_mapping),
     # Tickets API (v1, versioned like alerts)
     path('api/v1/tickets/', include('tickets.urls')),
+    path('api/v1/workflows/', include('workflows.urls')),
+    path('api/v1/interfaces/', include('workflow_interfaces.urls')),
     path('api/v1/ai-assistant/test-connectivity', ai_test_connectivity),
     path('api/v1/ai-assistant/test-connectivity/', ai_test_connectivity),
     path('api/v1/ai-assistant/mcp-monitor', ai_mcp_monitor),
