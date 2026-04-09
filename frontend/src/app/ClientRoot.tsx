@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import { App } from 'antd';
 import BasicLayout from '../components/layout/BasicLayout';
 import LoginForm from '../modules/accounts/components/LoginForm';
 
@@ -46,9 +47,13 @@ export default function ClientRoot({ children }: { children: React.ReactNode }) 
     return null;
   }
 
-  return !loggedIn ? (
-    <LoginForm onLogin={() => setLoggedIn(true)} />
-  ) : (
-    <BasicLayout onLoggedOut={() => setLoggedIn(false)}>{children}</BasicLayout>
+  return (
+    <App>
+      {!loggedIn ? (
+        <LoginForm onLogin={() => setLoggedIn(true)} />
+      ) : (
+        <BasicLayout onLoggedOut={() => setLoggedIn(false)}>{children}</BasicLayout>
+      )}
+    </App>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import dayjs from 'dayjs';
-import { Button, Card, Col, DatePicker, Form, Grid, Input, Modal, Row, Segmented, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { App, Button, Card, Col, Form, Grid, Input, Modal, Row, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType, TableProps } from 'antd/es/table';
 import { Pie } from '@ant-design/plots';
 import { createSlaTicket, updateSlaTicket, updateSlaTicketStatus } from 'services/tickets';
@@ -140,6 +140,15 @@ const parseQuery = (raw: string): QueryFilters => {
 
 export default function SlaTicketListView(props: Props) {
   const { tickets, loading, onRefresh, onOpenDetail } = props;
+  const { message } = App.useApp();
+  const storedUsername = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    try {
+      return localStorage.getItem('siem_username') || '';
+    } catch {
+      return '';
+    }
+  }, []);
   const screens = Grid.useBreakpoint();
   const [showChartPanel, setShowChartPanel] = useState(true);
   const [query, setQuery] = useState('');
@@ -216,7 +225,6 @@ export default function SlaTicketListView(props: Props) {
   }, [autoRefresh, onRefresh]);
 
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [incidentDateRange, setIncidentDateRange] = useState<any>(null);
   const rowSelection: TableProps<SlaTicketListItem>['rowSelection'] = {
     selectedRowKeys,
     onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
@@ -399,6 +407,22 @@ export default function SlaTicketListView(props: Props) {
     URL.revokeObjectURL(url);
   };
 
+  const formatTimestamp = (value?: string | null) => {
+    if (!value) return '';
+    const dt = dayjs(value);
+    return dt.isValid() ? dt.format('YYYY-MM-DD HH:mm:ss') : String(value);
+  };
+
+  const formatDuration = (value?: number | null) => {
+    if (value === undefined || value === null || Number.isNaN(Number(value))) return '-';
+    const total = Math.max(0, Math.floor(Number(value)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  };
+
   const columns: ColumnsType<SlaTicketListItem> = [
     { title: 'ID', dataIndex: 'ticket_number', key: 'ticket_number', width: 180, render: (v: string) => <a onClick={() => onOpenDetail(v)}>{v}</a> },
     { title: 'Name', dataIndex: 'title', key: 'title', ellipsis: true },
@@ -411,11 +435,11 @@ export default function SlaTicketListView(props: Props) {
       width: 220,
       render: (_: any, r: SlaTicketListItem) => (
         <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
-          MTTA:{r.sla_summary?.mtta_seconds ?? '-'} / MTTR:{r.sla_summary?.mttr_seconds ?? '-'}
+          TTA:{formatDuration(r.sla_summary?.mtta_seconds)} / TTR:{formatDuration(r.sla_summary?.mttr_seconds)}
         </span>
       ),
     },
-    { title: 'Created', dataIndex: 'created_time', key: 'created_time', width: 200 },
+    { title: 'Created', dataIndex: 'created_time', key: 'created_time', width: 200, render: (v: string | null | undefined) => formatTimestamp(v) },
   ];
 
   const toPieData = (rec: Record<string, number>, order?: string[]) => {
@@ -423,18 +447,10 @@ export default function SlaTicketListView(props: Props) {
     return keys.filter((k) => rec[k]).map((k) => ({ type: k, value: rec[k] }));
   };
   const sumRec = (rec: Record<string, number>) => Object.values(rec).reduce((acc, v) => acc + (Number(v) || 0), 0);
-  const buildDateQuery = (range: any) => {
-    if (!range || !range[0] || !range[1]) return {};
-    return {
-      created_from: range[0].toISOString(),
-      created_to: range[1].toISOString(),
-    };
-  };
 
   const applyQuickRange = (key: string | null) => {
     if (!key) {
       setQuickRange(null);
-      setIncidentDateRange(null);
       onRefresh({});
       return;
     }
@@ -446,7 +462,6 @@ export default function SlaTicketListView(props: Props) {
     if (key === '7d') start = now.subtract(7, 'day');
     if (key === '30d') start = now.subtract(30, 'day');
     setQuickRange(key);
-    setIncidentDateRange([start, now]);
     onRefresh({
       created_from: start.toISOString(),
       created_to: now.toISOString(),
@@ -543,12 +558,14 @@ export default function SlaTicketListView(props: Props) {
     try {
       const values = await form.validateFields();
       const eventSiemId = (values.event_siem_id || '').trim();
+      const createUid = (values.create_uid || '').trim();
       const payload = {
         ...(eventSiemId ? { event_siem_id: eventSiemId } : {}),
         title: values.title.trim(),
         description: values.description?.trim() || '',
         priority: values.priority || 'medium',
         status: 'new',
+        create_uid: createUid,
       };
       setCreating(true);
       const created = await createSlaTicket(payload);
@@ -586,7 +603,7 @@ export default function SlaTicketListView(props: Props) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <Button onClick={() => onRefresh(buildDateQuery(incidentDateRange))} loading={loading}>Refresh</Button>
+          <Button onClick={() => onRefresh()} loading={loading}>Refresh</Button>
         </Space>
       </div>
 
@@ -594,20 +611,7 @@ export default function SlaTicketListView(props: Props) {
           <a onClick={() => setShowChartPanel((v) => !v)}>{showChartPanel ? 'Hide Chart Panel' : 'Show Chart Panel'}</a>
           <Space wrap>
             <Space size={6} wrap>
-              <DatePicker.RangePicker
-                value={incidentDateRange}
-                onChange={(v) => {
-                  setIncidentDateRange(v);
-                  setQuickRange(null);
-                  onRefresh(buildDateQuery(v));
-                }}
-                showTime={{ format: 'HH:mm:ss.SSS' }}
-                format="YYYY-MM-DD HH:mm:ss.SSS"
-                allowClear
-                size="small"
-                style={{ width: 320 }}
-                placeholder={['Start', 'End']}
-              />
+              {/* RangePicker removed to avoid React 19 ref warnings; quick ranges below stay available. */}
               <Button size="small" type={quickRange === '15m' ? 'primary' : 'default'} onClick={() => applyQuickRange('15m')}>15m</Button>
               <Button size="small" type={quickRange === '1h' ? 'primary' : 'default'} onClick={() => applyQuickRange('1h')}>1h</Button>
               <Button size="small" type={quickRange === '24h' ? 'primary' : 'default'} onClick={() => applyQuickRange('24h')}>24h</Button>
@@ -855,10 +859,10 @@ export default function SlaTicketListView(props: Props) {
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>{t.title}</div>
                   <div style={{ color: 'rgba(0,0,0,0.6)' }}>Owner: {t.assigned_user_username || 'Unassigned'}</div>
                   <div style={{ color: 'rgba(0,0,0,0.6)' }}>
-                    SLA: MTTA {t.sla_summary?.mtta_seconds ?? '-'} / MTTR {t.sla_summary?.mttr_seconds ?? '-'}
+                    SLA: TTA {formatDuration(t.sla_summary?.mtta_seconds)} / TTR {formatDuration(t.sla_summary?.mttr_seconds)}
                   </div>
                   <div style={{ color: 'rgba(0,0,0,0.45)', marginTop: 6, fontSize: 12 }}>
-                    Created: {t.created_time}
+                    Created: {formatTimestamp(t.created_time)}
                   </div>
                 </Card>
               </Col>
@@ -876,6 +880,9 @@ export default function SlaTicketListView(props: Props) {
         destroyOnClose
       >
         <Form form={form} layout="vertical">
+          <Form.Item label="Created By" name="create_uid" initialValue={storedUsername} rules={[{ required: true, message: 'Created by is required' }]}>
+            <Input placeholder="Username" />
+          </Form.Item>
           <Form.Item label="SIEM Event ID (optional)" name="event_siem_id">
             <Input placeholder="Optional" />
           </Form.Item>
