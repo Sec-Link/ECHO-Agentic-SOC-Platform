@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'alerts',
     'dashboards',
     'tickets',
+    'cmdb',
     'ai_assistant',
     'orchestrator',
     'django_scheduled_tasks',
