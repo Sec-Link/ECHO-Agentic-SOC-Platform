@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }} # 默认即可，用于回推代码
+          token: ${{ secrets.MICHAEL_ADMIN_PAT }} # 默认即可，用于回推代码
 
       - name: Update Image Tags in YAML
         run: |
