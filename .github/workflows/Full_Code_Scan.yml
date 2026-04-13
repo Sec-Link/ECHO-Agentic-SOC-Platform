@@ -1,162 +1,97 @@
-name: Full Security Scan (Full)
+name: Full Security Scan
 
 on:
   workflow_dispatch:
 
 jobs:
   security-check:
-    name: Full Security Scan & Report
+    name: Security Scan & Org Report
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      security-events: write
+    
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Init Summary
-        run: |
-          echo "# 🛡️ SIEM 平台安全审计报告 (全量扫描)" >> $GITHUB_STEP_SUMMARY
-          echo "扫描时间: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          echo "> 💡 本次为手动触发的全量代码安全扫描，覆盖仓库中全部代码。" >> $GITHUB_STEP_SUMMARY
-
-      - name: Run Gitleaks (Docker, JSON)
+      # --- 1. Gitleaks ---
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
         continue-on-error: true
         env:
-          GITLEAKS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-        run: |
-          docker run --rm -v "$PWD":/src \
-            -e GITLEAKS_GITHUB_TOKEN="$GITLEAKS_GITHUB_TOKEN" \
-            -e GITLEAKS_LICENSE="$GITLEAKS_LICENSE" \
-            ghcr.io/gitleaks/gitleaks:latest detect --source /src --report-format json --report-path /src/gitleaks-report.json || true
+        with:
+          format: sarif
+          report_path: gitleaks.sarif
 
-      - name: Run Semgrep (Full)
+      # --- 2. Semgrep (SAST) ---
+      - name: Run Semgrep
         run: |
           pip install semgrep
-          semgrep --config auto --json -o semgrep-full.json || true
+          semgrep --config auto --sarif -o semgrep.sarif || true
 
-      - name: Run Bandit (Backend)
+      # --- 3. Bandit (Python 审计) ---
+      - name: Run Bandit
         run: |
           if [ -d backend ]; then
-            pip install bandit
-            bandit -r ./backend -ll -f json -o bandit-full.json || true
-          else
-            echo "{}" > bandit-full.json
+            pip install bandit bandit_sarif_formatter
+            bandit -r ./backend -ll -f sarif -o bandit.sarif || true
           fi
 
-      - name: Run NPM Audit (Frontend)
-        run: |
-          if [ -f frontend/package.json ]; then
-            cd frontend
-            npm ci --package-lock-only || true
-            npm audit --json > ../npm-audit-full.json || true
-          else
-            echo "{}" > npm-audit-full.json
-          fi
-
-      - name: Generate Summary Report
-        if: always()
-        run: |
-          echo "## 🔑 密钥安全 (Gitleaks)" >> $GITHUB_STEP_SUMMARY
-          if [ -f gitleaks-report.json ] && [ "$(jq '. | length' gitleaks-report.json)" -gt 0 ]; then
-            echo "❌ 发现密钥泄露，请立即处理！" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ 未发现密钥泄露。" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "## 🔍 代码安全 (Semgrep 全量)" >> $GITHUB_STEP_SUMMARY
-          if [ -f semgrep-full.json ]; then
-            COUNT=$(jq '.results | length' semgrep-full.json)
-            if [ "$COUNT" -gt 0 ]; then
-              echo "⚠️ 发现 **$COUNT** 处潜在风险，详见报告附件。" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "✅ 未发现潜在风险（Semgrep）。" >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
-
-          echo "## 🐍 Python 扫描 (Bandit)" >> $GITHUB_STEP_SUMMARY
-          if [ -f bandit-full.json ]; then
-            BCOUNT=$(jq '.results | length' bandit-full.json)
-            [ "$BCOUNT" -gt 0 ] && echo "⚠️ Bandit 发现 $BCOUNT 个问题，请检查报告。" >> $GITHUB_STEP_SUMMARY || echo "✅ Bandit 未发现高风险问题。" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "## 📦 前端依赖 (NPM Audit)" >> $GITHUB_STEP_SUMMARY
-          if [ -f npm-audit-full.json ]; then
-            echo "请查看 npm-audit-full.json 获取依赖安全详情。" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Archive Reports
-        uses: actions/upload-artifact@v4
+      # --- 5. 上传至 Security 标签页 ---
+      - name: Upload to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          name: full-security-reports
-          path: |
-            gitleaks-report.json
-            semgrep-full.json
-            bandit-full.json
-            npm-audit-full.json
-          retention-days: 7
+          sarif_file: . 
 
+      # --- 6. 统计并发送飞书通知 ---
       - name: Send Feishu Notification
         if: always()
         run: |
-          GITLEAKS_COUNT=$(if [ -f gitleaks-report.json ]; then jq '. | length' gitleaks-report.json; else echo 0; fi)
-          SEMGREP_COUNT=$(if [ -f semgrep-full.json ]; then jq '.results | length' semgrep-full.json; else echo 0; fi)
-          if [ "$GITLEAKS_COUNT" -eq 0 ] && [ "$SEMGREP_COUNT" -eq 0 ]; then
-            STATUS_ICON="✅"
-            STATUS_TEXT="安全合规"
-          else
-            STATUS_ICON="❌"
-            STATUS_TEXT="发现风险"
-          fi
+          G_COUNT=$(if [ -f gitleaks.sarif ]; then jq '[.runs[].results[] // []] | length' gitleaks.sarif; else echo 0; fi)
+          S_COUNT=$(if [ -f semgrep.sarif ]; then jq '[.runs[].results[] // []] | length' semgrep.sarif; else echo 0; fi)
+          B_COUNT=$(if [ -f bandit.sarif ]; then jq '[.runs[].results[] // []] | length' bandit.sarif; else echo 0; fi)
 
-          MESSAGE_JSON=$(cat <<EOF
-          {
+          TOTAL=$((G_COUNT + S_COUNT + B_COUNT + N_COUNT))
+          
+          # 颜色逻辑：Gitleaks 发现泄露必红，其余发现风险橙色，无风险绿色
+          if [ "$G_COUNT" -gt 0 ]; then COLOR="red"; STATUS="严重风险 (密钥泄露)"; 
+          elif [ "$TOTAL" -gt 0 ]; then COLOR="orange"; STATUS="发现潜在风险"; 
+          else COLOR="green"; STATUS="安全合规"; fi
+
+          SECURITY_URL="${{ github.server_url }}/${{ github.repository }}/security/code-scanning"
+
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
             "msg_type": "interactive",
             "card": {
               "config": { "wide_screen_mode": true },
               "header": {
-                "title": { "tag": "plain_text", "content": "🛡️ SIEM 全量安全审计报告 ($STATUS_TEXT)" },
-                "template": "$( [ "$STATUS_TEXT" = "安全合规" ] && echo "green" || echo "red" )"
+                "title": { "tag": "plain_text", "content": "🛡️ ECHO-SIEM-Platform Full Scan ($STATUS)" },
+                "template": "'$COLOR'"
               },
               "elements": [
                 {
                   "tag": "div",
                   "text": {
                     "tag": "lark_md",
-                    "content": "**项目:** ${{ github.repository }}\n**触发者:** ${{ github.actor }}\n**触发方式:** 手动 (workflow_dispatch)\n**状态:** $STATUS_ICON $STATUS_TEXT"
+                    "content": "**项目:** ${{ github.repository }}\n\n🔑 密钥泄露: **'$G_COUNT'**\n🔍 代码风险: **'$((S_COUNT + B_COUNT))'**\n📦 依赖风险: **'$N_COUNT'**"
                   }
                 },
                 { "tag": "hr" },
                 {
-                  "tag": "div",
-                  "text": {
-                    "tag": "lark_md",
-                    "content": "🔑 **密钥泄露:** $GITLEAKS_COUNT 处\n🔍 **代码风险 (Semgrep):** $SEMGREP_COUNT 处\n📦 **依赖风险:** $( [ -f npm-audit-full.json ] && echo "需查阅详情" || echo "无")"
-                  }
-                },
-                {
-                  "tag": "note",
-                  "elements": [{ "tag": "plain_text", "content": "点击下方按钮查看 GitHub Action 运行及附件" }]
-                },
-                {
                   "tag": "action",
-                  "actions": [
-                    {
-                      "tag": "button",
-                      "text": { "tag": "plain_text", "content": "查看详情" },
-                      "type": "primary",
-                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                    }
-                  ]
+                  "actions": [{
+                    "tag": "button",
+                    "text": { "tag": "plain_text", "content": "查看漏洞报告" },
+                    "type": "primary",
+                    "url": "'$SECURITY_URL'"
+                  }]
                 }
               ]
             }
-          }
-          EOF
-          )
-
-          curl -X POST -H "Content-Type: application/json" \
-               -d "$MESSAGE_JSON" \
-               ${{ secrets.FEISHU_WEBHOOK_URL }} || true
+          }' ${{ secrets.FEISHU_WEBHOOK_URL }}
