@@ -1,4 +1,4 @@
-name: PR Security Scan (Incremental)
+name: PR Security Scan (Incremental & Private)
 
 on:
   pull_request:
@@ -6,206 +6,106 @@ on:
 
 jobs:
   security-checks:
-    name: Security Scan & Report
+    name: Security Scan & Private Report
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      security-events: write
       pull-requests: read
+    
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --- 1. 初始化 Summary ---
-      - name: Init Summary
-        run: |
-          echo "# 🛡️ SIEM 平台安全审计报告 (增量模式)" >> $GITHUB_STEP_SUMMARY
-          echo "扫描时间: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
-          echo "> 💡 本次扫描仅针对 PR 变动的文件。全量审计请查看每周定期报告。" >> $GITHUB_STEP_SUMMARY
-
-      # --- 2. 获取变动文件列表 ---
+      # --- 1. 获取变动文件列表 ---
       - name: Get Changed Files
         id: changed-files
         run: |
-          # 获取与主分支对比的变更文件列表
           FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | xargs)
           echo "files=$FILES" >> $GITHUB_OUTPUT
 
-      # --- 3. Secret Scan (Gitleaks) - 增量扫描，仅扫描变动文件 ---
-      - name: Run Gitleaks (Incremental)
+      # --- 2. Gitleaks (增量扫描) ---
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
         continue-on-error: true
         env:
-          GITLEAKS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-        run: |
-          CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
-          if [ -n "$CHANGED_FILES" ]; then
-            mkdir -p tmp_gitleaks_scan
-            for f in $CHANGED_FILES; do
-              if [ -f "$f" ]; then
-                mkdir -p "$(dirname tmp_gitleaks_scan/$f)"
-                cp "$f" "tmp_gitleaks_scan/$f" || true
-              fi
-            done
-            docker run --rm -v "$PWD":/src ghcr.io/gitleaks/gitleaks:latest detect --source /src/tmp_gitleaks_scan --report-format json --report-path /src/gitleaks-report.json || true
-          else
-            echo "{}" > gitleaks-report.json
-          fi
+          GITLEAKS_ENABLE_SUMMARY: false
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+        with:
+          format: sarif
+          report_path: gitleaks.sarif
 
-      # --- 4. SAST (Semgrep) - 增量扫描 ---
+      # --- 3. Semgrep ---
       - name: Run Semgrep (Incremental)
         run: |
           pip install semgrep
           CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
           if [ -n "$CHANGED_FILES" ]; then
-            # 仅扫描变动的文件
-            semgrep --config auto $CHANGED_FILES --json -o semgrep-full.json || true
-          else
-            echo "{ \"results\": [] }" > semgrep-full.json
+            semgrep --config auto $CHANGED_FILES --sarif -o semgrep.sarif || true
           fi
 
-      # --- 5. Backend (Bandit) - 按需扫描 ---
+      # --- 4. Bandit (按需扫描) ---
       - name: Run Bandit
         run: |
-          # 检查 backend 目录是否有变动
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^backend/"; then
-            pip install bandit
-            bandit -r ./backend -ll -f json -o bandit-full.json || true
-          else
-            echo "SKIPPED" > bandit-skipped
+            pip install bandit bandit_sarif_formatter
+            bandit -r ./backend -ll -f sarif -o bandit.sarif || true
           fi
 
-      # --- 6. Frontend (NPM Audit) - 按需扫描 ---
-      - name: Run NPM Audit
-        run: |
-          # 只有 package.json 变动时才运行依赖扫描
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "frontend/package.json"; then
-            cd frontend && npm audit --json > ../npm-audit-full.json || true
-          else
-            echo "SKIPPED" > npm-audit-skipped
-          fi
-
-      # --- 7. 生成报告 (精简版) ---
-      - name: Generate Summary Report
-        if: always()
-        run: |
-          # --- Gitleaks 部分 ---
-          echo "## 🔑 密钥安全" >> $GITHUB_STEP_SUMMARY
-          if [ -f gitleaks-report.json ]; then
-            # 验证 JSON 有效性，获取数组长度（gitleaks 返回数组）
-            GITLEAKS_COUNT=$(jq -r 'if type == "array" then length elif type == "object" then .[] | length else 0 end' gitleaks-report.json 2>/dev/null || echo 0)
-            if [ "$GITLEAKS_COUNT" -gt 0 ]; then
-              echo "❌ 发现密钥泄露（$GITLEAKS_COUNT 处），请立即处理！" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "✅ 未发现新密钥泄露。" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "⚠️ Gitleaks 报告未生成。" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          # --- Semgrep 部分 ---
-          echo "## 🔍 代码安全 (增量)" >> $GITHUB_STEP_SUMMARY
-          if [ -f semgrep-full.json ]; then
-            # 安全检查 results 字段存在且为数组
-            COUNT=$(jq -r '.results // [] | if type == "array" then length else 0 end' semgrep-full.json 2>/dev/null || echo 0)
-            if [ "$COUNT" -gt 0 ]; then
-              echo "⚠️ 本次变动引入了 **$COUNT** 个潜在风险。" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "✅ 本次变动未引入新风险。" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "⚠️ Semgrep 报告未生成。" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          # --- 模块跳过提醒 ---
-          [ -f bandit-skipped ] && echo "## 🐍 Python 扫描: ⏩ 跳过 (无变动)" >> $GITHUB_STEP_SUMMARY
-          [ -f npm-audit-skipped ] && echo "## 📦 前端依赖: ⏩ 跳过 (依赖未变)" >> $GITHUB_STEP_SUMMARY
-
-      # --- 8. 归档附件 ---
-      - name: Archive Reports
-        uses: actions/upload-artifact@v4
+      # --- 6.Security Tab ---
+      - name: Upload to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          name: incremental-security-reports
-          path: |
-            gitleaks-report.json
-            semgrep-full.json
-            bandit-full.json
-            npm-audit-full.json
-          retention-days: 3
+          sarif_file: . 
 
-      # --- 9. 发送飞书通知 ---
+      # --- 7. 发送飞书通知---
       - name: Send Feishu Notification
         if: always()
         run: |
-          # 提取统计数据
-          GITLEAKS_COUNT=$(if [ -f gitleaks-report.json ]; then jq '. | length' gitleaks-report.json; else echo 0; fi)
-          SEMGREP_COUNT=$(if [ -f semgrep-full.json ]; then jq '.results | length' semgrep-full.json; else echo 0; fi)
-          
-          # 判断整体状态
-          if [ "$GITLEAKS_COUNT" -eq 0 ] && [ "$SEMGREP_COUNT" -eq 0 ]; then
-            STATUS_ICON="✅"
-            STATUS_TEXT="安全合规"
-          else
-            STATUS_ICON="❌"
-            STATUS_TEXT="发现风险"
-          fi
+          # 统计逻辑
+          G_COUNT=$(jq '.runs[0].results | length // 0' gitleaks.sarif || echo 0)
+          S_COUNT=$(if [ -f semgrep.sarif ]; then jq '[.runs[].results[] // []] | length' semgrep.sarif; else echo 0; fi)
+          B_COUNT=$(if [ -f bandit.sarif ]; then jq '[.runs[].results[] // []] | length' bandit.sarif; else echo 0; fi)
 
-          # 构建 Markdown 消息内容
-          # 注意：飞书机器人 Markdown 格式与 GitHub 略有不同
-          MESSAGE_JSON=$(cat <<EOF
-          {
+          TOTAL=$((G_COUNT + S_COUNT + B_COUNT))
+          
+          # 颜色逻辑
+          if [ "$G_COUNT" -gt 0 ]; then COLOR="red"; STATUS="紧急：PR 包含泄露密钥";
+          elif [ "$TOTAL" -gt 0 ]; then COLOR="orange"; STATUS="注意：PR 引入安全风险";
+          else COLOR="green"; STATUS="安全合规"; fi
+
+          SECURITY_URL="${{ github.server_url }}/${{ github.repository }}/security/code-scanning"
+
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
             "msg_type": "interactive",
             "card": {
-              "config": { "wide_screen_mode": true },
               "header": {
-                "title": { "tag": "plain_text", "content": "🛡️ SIEM 安全审计报告 ($STATUS_TEXT)" },
-                "template": "$( [ "$STATUS_TEXT" = "安全合规" ] && echo "green" || echo "red" )"
+                "title": { "tag": "plain_text", "content": "🛡️ PR 增量安全审计 ($STATUS)" },
+                "template": "'$COLOR'"
               },
               "elements": [
                 {
                   "tag": "div",
                   "text": {
                     "tag": "lark_md",
-                    "content": "**项目:** ${{ github.repository }}\n**提交者:** ${{ github.actor }}\n**分支:** ${{ github.head_ref }}\n**状态:** $STATUS_ICON $STATUS_TEXT"
+                    "content": "**项目:** ${{ github.repository }}\n**提交者:** ${{ github.actor }}\n**分支:** ${{ github.head_ref }} -> ${{ github.base_ref }}\n\n🔑 密钥泄露: **'$G_COUNT'**\n🔍 新增风险: **'$((S_COUNT + B_COUNT))'**\n📦 依赖风险: **'$SNYK_COUNT'**"
                   }
                 },
                 { "tag": "hr" },
                 {
-                  "tag": "div",
-                  "text": {
-                    "tag": "lark_md",
-                    "content": "🔑 **密钥泄露:** $GITLEAKS_COUNT 处\n🔍 **新增代码风险:** $SEMGREP_COUNT 处\n📦 **依赖风险:** $( [ -f npm-audit-full.json ] && echo "需查阅详情" || echo "跳过" )"
-                  }
-                },
-                {
-                  "tag": "note",
-                  "elements": [{ "tag": "plain_text", "content": "点击下方按钮查看 GitHub Action 详细报告及附件" }]
-                },
-                {
                   "tag": "action",
-                  "actions": [
-                    {
-                      "tag": "button",
-                      "text": { "tag": "plain_text", "content": "查看详情" },
-                      "type": "primary",
-                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                    }
-                  ]
+                  "actions": [{
+                    "tag": "button",
+                    "text": { "tag": "plain_text", "content": "查看 PR 安全详情" },
+                    "type": "primary",
+                    "url": "'$SECURITY_URL'"
+                  }]
                 }
               ]
             }
-          }
-          EOF
-          )
-
-          # 调用 Webhook
-          curl -X POST -H "Content-Type: application/json" \
-               -d "$MESSAGE_JSON" \
-               ${{ secrets.FEISHU_WEBHOOK_URL }}
-
-      # --- 10. Setup Python ---
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-          cache: 'pip'
+          }' ${{ secrets.FEISHU_WEBHOOK_URL }}

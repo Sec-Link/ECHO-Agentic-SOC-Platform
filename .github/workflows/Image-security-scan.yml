@@ -1,4 +1,4 @@
-name: Image Security Scan
+name: Image Security Scan (Private & Integrated)
 
 on:
   workflow_run:
@@ -13,6 +13,10 @@ jobs:
     strategy:
       matrix:
         service: [siem-backend, siem-frontend]
+    
+    permissions:
+      contents: read
+      security-events: write # 必须：用于上传镜像扫描结果到 Security 标签页
 
     steps:
       - name: Checkout code
@@ -25,7 +29,18 @@ jobs:
           username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
 
-      - name: Run Trivy scanner
+      # --- 1. Trivy 扫描并生成 SARIF (用于 Security Tab) ---
+      - name: Run Trivy for Security Tab
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.ALIYUN_REGISTRY }}/siem/${{ matrix.service }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+
+      # --- 2. Trivy 扫描并生成 JSON (用于飞书报数统计) ---
+      - name: Run Trivy for Stats
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ secrets.ALIYUN_REGISTRY }}/siem/${{ matrix.service }}:latest
@@ -34,62 +49,56 @@ jobs:
           severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
 
-      - name: Process Report for Feishu
-        id: process_report
+      # --- 3. 上传到 Security 标签页 (仅内部可见) ---
+      - name: Upload Scan Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
-        run: |
-          if [ ! -f report.json ]; then
-            echo "status_color=red" >> $GITHUB_OUTPUT
-            echo "title=扫描失败: ${{ matrix.service }}" >> $GITHUB_OUTPUT
-            echo "content=❌ 未找到扫描报告文件" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: ${{ matrix.service }} # 区分不同的服务镜像
 
-          # 提取漏洞关键信息并限制长度，防止消息体过大
-          # 使用 jq 提取 CVE ID、等级和包名，并截断单行内容
-          VULNS=$(jq -r '.Results[]?.Vulnerabilities[]? | "- **\(.VulnerabilityID)** | \(.Severity) | \(.PkgName)"' report.json | head -n 30 | cut -c1-200)
-
-          if [ -z "$VULNS" ]; then
-            echo "status_color=green" >> $GITHUB_OUTPUT
-            echo "title=扫描通过: ${{ matrix.service }}" >> $GITHUB_OUTPUT
-            echo "content=✅ 未发现高危漏洞" >> $GITHUB_OUTPUT
-          else
-            echo "status_color=red" >> $GITHUB_OUTPUT
-            echo "title=发现漏洞: ${{ matrix.service }}" >> $GITHUB_OUTPUT
-            # 使用环境变量写入多行内容
-            echo "content<<EOF" >> $GITHUB_OUTPUT
-            echo "$VULNS" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
-
+      # --- 4. 处理数据发送飞书 (不留附件，不留摘要) ---
       - name: Notify Feishu
         if: always()
-        env:
-          VULN_CONTENT: ${{ steps.process_report.outputs.content }}
-          TITLE: ${{ steps.process_report.outputs.title }}
-          COLOR: ${{ steps.process_report.outputs.status_color }}
         run: |
-          # 核心修复点：使用 jq 的 --arg 自动处理转义字符，这是解决 9499 错误的关键
+          # 精确统计漏洞数量
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' report.json || echo 0)
+          HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' report.json || echo 0)
+          TOTAL=$((CRITICAL_COUNT + HIGH_COUNT))
+
+          if [ "$TOTAL" -eq 0 ]; then
+            COLOR="green"
+            STATUS="安全合规"
+            TITLE="✅ 镜像扫描通过: ${{ matrix.service }}"
+          else
+            COLOR="red"
+            STATUS="发现 $TOTAL 个高危漏洞"
+            TITLE="❌ 镜像安全告警: ${{ matrix.service }}"
+          fi
+
+          SECURITY_URL="${{ github.server_url }}/${{ github.repository }}/security/code-scanning?query=is:open+tool:Trivy"
+
           PAYLOAD=$(jq -n \
             --arg title "$TITLE" \
             --arg color "$COLOR" \
-            --arg content "$VULN_CONTENT" \
-            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --arg footer "Tag: ${{ github.event.workflow_run.head_sha || github.sha }}" \
+            --arg detail "服务: \`${{ matrix.service }}\`\n致命漏洞 (Critical): **$CRITICAL_COUNT**\n高危漏洞 (High): **$HIGH_COUNT**\n\n请项目管理员及时在 GitHub Security 面板处理。" \
+            --arg url "$SECURITY_URL" \
             '{
               "msg_type": "interactive",
               "card": {
                 "header": { "template": $color, "title": { "tag": "plain_text", "content": $title } },
                 "elements": [
-                  {
-                    "tag": "div",
-                    "text": {
-                      "tag": "lark_md",
-                      "content": ("**服务:** `${{ matrix.service }}`\n**漏洞预览 (Top 30):**\n" + $content + "\n\n[点击查看 Github Action 完整报告](" + $url + ")")
-                    }
-                  },
+                  { "tag": "div", "text": { "tag": "lark_md", "content": $detail } },
                   { "tag": "hr" },
-                  { "tag": "note", "elements": [{ "tag": "plain_text", "content": $footer }] }
+                  {
+                    "tag": "action",
+                    "actions": [{
+                      "tag": "button",
+                      "text": { "tag": "plain_text", "content": "查看私密详情" },
+                      "type": "primary",
+                      "url": $url
+                    }]
+                  }
                 ]
               }
             }')
@@ -97,11 +106,3 @@ jobs:
           curl -X POST '${{ secrets.FEISHU_WEBHOOK_URL }}' \
           -H 'Content-Type: application/json' \
           -d "$PAYLOAD"
-
-      - name: Upload Scan Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-report-${{ matrix.service }}
-          path: report.json
-          retention-days: 7

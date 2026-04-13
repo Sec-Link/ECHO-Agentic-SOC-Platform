@@ -23,6 +23,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_SUMMARY: false
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
         with:
           format: sarif
           report_path: gitleaks.sarif
@@ -52,7 +54,7 @@ jobs:
       - name: Send Feishu Notification
         if: always()
         run: |
-          G_COUNT=$(if [ -f gitleaks.sarif ]; then jq '[.runs[].results[] // []] | length' gitleaks.sarif; else echo 0; fi)
+          G_COUNT=$(jq '.runs[0].results | length // 0' gitleaks.sarif || echo 0)
           S_COUNT=$(if [ -f semgrep.sarif ]; then jq '[.runs[].results[] // []] | length' semgrep.sarif; else echo 0; fi)
           B_COUNT=$(if [ -f bandit.sarif ]; then jq '[.runs[].results[] // []] | length' bandit.sarif; else echo 0; fi)
 
@@ -71,7 +73,7 @@ jobs:
             "card": {
               "config": { "wide_screen_mode": true },
               "header": {
-                "title": { "tag": "plain_text", "content": "🛡️ ECHO-SIEM-Platform Full Scan ($STATUS)" },
+                "title": { "tag": "plain_text", "content": "🛡️ ECHO-SIEM-Platform Full Scan" },
                 "template": "'$COLOR'"
               },
               "elements": [
