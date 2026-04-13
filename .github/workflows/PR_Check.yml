@@ -1,4 +1,4 @@
-name: PR Security Scan (Incremental & Private)
+name: PR Security Scan
 
 on:
   pull_request:
