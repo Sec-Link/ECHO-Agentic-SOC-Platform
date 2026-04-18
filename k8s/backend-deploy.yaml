@@ -30,7 +30,7 @@ spec:
           privileged: false
           capabilities:
             drop: ["ALL"]
-          readOnlyRootFilesystem: true
+          readOnlyRootFilesystem: false
         env:
         - name: POSTGRES_DB
           value: "siem_db"
