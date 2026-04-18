@@ -15,12 +15,21 @@ spec:
         app: siem-db
     spec:
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
         fsGroup: 999
+
       imagePullSecrets:
         - name: aliyun-acr-secret
       containers:
       - name: postgres
         image: seclink-siem-cr-registry.cn-hangzhou.cr.aliyuncs.com/siem/postgres:16
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: false
         env:
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
