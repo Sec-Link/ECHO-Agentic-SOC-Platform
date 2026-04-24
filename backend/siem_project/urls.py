@@ -16,7 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
-from accounts.views import LoginAPIView, LogoutAPIView, RegisterAPIView
+from accounts.views import LoginAPIView, LogoutAPIView, RegisterAPIView, RegisterEmailAPIView, OTPRequestAPIView, OTPVerifyAPIView
 from dashboards.views import DashboardViewSet
 from integrations.views import test_es_connection
 from integrations.views import IntegrationViewSet, preview_es_index
@@ -58,10 +58,17 @@ urlpatterns = [
     path('api/v1/auth/logout', LogoutAPIView.as_view()),
     path('api/v1/auth/register/', RegisterAPIView.as_view(), name='register'),
     path('api/v1/auth/register', RegisterAPIView.as_view()),
+    path('api/v1/auth/register-email/', RegisterEmailAPIView.as_view(), name='register-email'),
+    path('api/v1/auth/register-email', RegisterEmailAPIView.as_view()),
+    path('api/v1/auth/otp/request/', OTPRequestAPIView.as_view(), name='otp-request'),
+    path('api/v1/auth/otp/request', OTPRequestAPIView.as_view()),
+    path('api/v1/auth/otp/verify/', OTPVerifyAPIView.as_view(), name='otp-verify'),
+    path('api/v1/auth/otp/verify', OTPVerifyAPIView.as_view()),
     path('api/v1/alerts/', include('alerts.urls')),
     path('api/v1/correlation/', include('correlation.urls')),
     path('api/v1/accounts/', include('accounts.urls')),
     path('api/v1/permissions/', include('accounts.urls_permissions')),  
+    path('api/v1/rbac/', include('accounts.urls_rbac')),
     path('api/v1/', include(router.urls)),  
     path('api/v1/integrations/test_es', test_es_connection),
     path('api/v1/integrations/preview_es', preview_es_index),

@@ -1,4 +1,4 @@
-﻿export type RouteKey =
+export type RouteKey =
   | 'dashboard'
   | 'alerts'
   | 'tickets'
@@ -10,6 +10,8 @@
   | 'interfaces'
   | 'correlation'
   | 'permissions'
+  | 'registration-approvals'
+  | 'audit-logs'
   | 'workflows'
   | 'workflow-executions'
   | 'ai-assistant'
@@ -17,7 +19,7 @@
 
 export const permissionByKey: Record<RouteKey, string | undefined> = {
   dashboard: undefined,
-  alerts: 'alerts.view_alert',
+  alerts: 'es_integration.view_alert',
   tickets: 'tickets.view_eventticket',
   assets: 'cmdb.view_asset',
   integrations: 'integrations.view_integration',
@@ -27,6 +29,8 @@ export const permissionByKey: Record<RouteKey, string | undefined> = {
   interfaces: 'workflow_interfaces.view_interfaceendpoint',
   correlation: 'correlation.view_correlationpolicy',
   permissions: 'accounts.view_user',
+  'registration-approvals': 'accounts.view_user',
+  'audit-logs': 'accounts.view_user',
   workflows: 'workflows.view_workflow',
   'workflow-executions': 'workflows.view_workflowexecution',
   profile: undefined,
@@ -45,6 +49,8 @@ export const keyToPath: Record<RouteKey, string> = {
   interfaces: '/settings/interfaces',
   correlation: '/settings/correlation',
   permissions: '/settings/permissions',
+  'registration-approvals': '/settings/registration-approvals',
+  'audit-logs': '/settings/audit-logs',
   workflows: '/settings/workflows',
   'workflow-executions': '/settings/workflows/executions',
   'ai-assistant': '/settings/ai-assistant',
@@ -76,6 +82,8 @@ export function resolveRouteKey(pathname: string): { key: RouteKey; ticketNumber
   if (p === '/settings/interfaces') return { key: 'interfaces' };
   if (p === '/settings/correlation') return { key: 'correlation' };
   if (p === '/settings/permissions') return { key: 'permissions' };
+  if (p === '/settings/registration-approvals') return { key: 'registration-approvals' };
+  if (p === '/settings/audit-logs') return { key: 'audit-logs' };
   if (p === '/settings/workflows') return { key: 'workflows' };
   if (p === '/settings/workflows/executions') return { key: 'workflow-executions' };
   if (p === '/settings/ai-assistant') return { key: 'ai-assistant' };
@@ -91,4 +99,3 @@ export function resolveRouteKey(pathname: string): { key: RouteKey; ticketNumber
 
   return { key: 'dashboard' };
 }
-

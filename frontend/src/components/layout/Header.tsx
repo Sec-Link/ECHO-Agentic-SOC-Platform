@@ -7,6 +7,7 @@ import { MoonOutlined, SunOutlined } from '@ant-design/icons';
 export default function Header({
   username,
   impersonation,
+  isReadonly,
   isDarkTheme,
   onToggleTheme,
   onOpenProfile,
@@ -15,6 +16,7 @@ export default function Header({
 }: {
   username: string | null;
   impersonation: { userId: number; username: string; permissions: string[] } | null;
+  isReadonly: boolean;
   isDarkTheme: boolean;
   onToggleTheme: () => void;
   onOpenProfile: () => void;
@@ -59,6 +61,7 @@ export default function Header({
         <div style={{ color: 'var(--text-primary)', fontWeight: 600, cursor: 'pointer' }} onClick={onOpenProfile}>
           {username || 'User'}
         </div>
+        {isReadonly ? <Tag color="blue">Readonly</Tag> : null}
         {impersonation ? <Tag color="orange">Impersonating: {impersonation.username}</Tag> : null}
         {impersonation ? <Button onClick={onClearImpersonation}>Exit impersonation</Button> : null}
         <Button type="primary" onClick={onLogout} style={{ background: '#ff4d4f', border: 'none' }}>

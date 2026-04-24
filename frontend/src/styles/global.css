@@ -680,6 +680,55 @@ html, body {
   color: #9ab8e6 !important;
 }
 
+.login-cyber-card .ant-segmented {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border: 1px solid rgba(255, 255, 255, 0.24) !important;
+}
+
+.login-cyber-card .ant-segmented-item-label {
+  color: #f1f6ff !important;
+  font-weight: 700;
+}
+
+.login-cyber-card .ant-segmented-item-selected .ant-segmented-item-label {
+  color: #04214f !important;
+  text-shadow: none !important;
+}
+
+.login-cyber-card .otp-resend-btn {
+  background: #0d2447 !important;
+  border: 1px solid #3f6ea9 !important;
+  color: #d8e8ff !important;
+  font-weight: 700;
+}
+
+.login-cyber-card .otp-resend-btn:hover:not(:disabled) {
+  background: #143362 !important;
+  border-color: #6ea2e2 !important;
+  color: #f1f7ff !important;
+}
+
+.login-cyber-card .otp-resend-btn:disabled,
+.login-cyber-card .otp-resend-btn.ant-btn[disabled] {
+  background: #0a1730 !important;
+  border-color: #2f456a !important;
+  color: #95b2d8 !important;
+  opacity: 1 !important;
+}
+
+.login-cyber-card .otp-back-btn {
+  background: #f2f7ff !important;
+  border: 1px solid #9cb8de !important;
+  color: #10294d !important;
+  font-weight: 700;
+}
+
+.login-cyber-card .otp-back-btn:hover {
+  background: #ffffff !important;
+  border-color: #c2d6f0 !important;
+  color: #0b2344 !important;
+}
+
 @keyframes htbGridDrift {
   from { transform: translate3d(0, 0, 0); }
   to { transform: translate3d(16px, 12px, 0); }

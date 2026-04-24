@@ -59,7 +59,10 @@ try {
 
 export function clearAccessToken() {
   accessToken = null;
-  try { localStorage.removeItem('siem_access_token'); } catch (e) {}
+  try {
+    localStorage.removeItem('siem_access_token');
+    localStorage.removeItem('siem_is_readonly');
+  } catch (e) {}
 }
 
 const client = axios.create({
@@ -71,6 +74,24 @@ const client = axios.create({
   xsrfHeaderName: 'X-CSRFToken',
 });
 const addAuthHeader = (config: InternalAxiosRequestConfig) => {
+  const method = String(config.method || 'get').toUpperCase();
+  const url = String(config.url || '');
+  const readonlyAllowedPaths = ['/auth/logout/', '/auth/otp/request/', '/auth/otp/verify/'];
+  if (typeof window !== 'undefined') {
+    let isReadonly = false;
+    try {
+      isReadonly = localStorage.getItem('siem_is_readonly') === '1';
+    } catch {}
+    const safeMethod = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+    const allowedPath = readonlyAllowedPaths.some((p) => url.startsWith(p));
+    if (isReadonly && !safeMethod && !allowedPath) {
+      return Promise.reject({
+        message: 'Readonly users cannot modify data.',
+        response: { status: 403, data: { detail: 'Readonly users cannot modify data.' } },
+      });
+    }
+  }
+
   if (accessToken) {
     if (!config.headers) {
       config.headers = {} as any;
@@ -93,9 +114,116 @@ export async function login(username: string, password: string) {
     const apiUsername = res.data?.user?.username || res.data?.username;
     if (apiUsername) localStorage.setItem('siem_username', apiUsername);
     else if (username) localStorage.setItem('siem_username', username);
+    if (res.data?.user?.is_readonly) localStorage.setItem('siem_is_readonly', '1');
+    else localStorage.removeItem('siem_is_readonly');
   } catch (err) {
     // ignore storage errors
   }
+  return res.data;
+}
+
+export async function register(
+  username: string,
+  email: string,
+  password: string,
+  passwordConfirm: string
+) {
+  const res = await client.post('/auth/register/', {
+    username,
+    email,
+    password,
+    password_confirm: passwordConfirm,
+  });
+  setAccessToken(res.data.token);
+  try {
+    localStorage.setItem('siem_access_token', res.data.token);
+    const apiUsername = res.data?.user?.username || username;
+    if (apiUsername) localStorage.setItem('siem_username', apiUsername);
+    if (res.data?.user?.is_readonly) localStorage.setItem('siem_is_readonly', '1');
+    else localStorage.removeItem('siem_is_readonly');
+  } catch (err) {}
+  return res.data;
+}
+
+export async function registerEmail(email: string) {
+  const res = await client.post('/auth/register-email/', { email });
+  return res.data;
+}
+
+export async function requestOtp(email: string) {
+  const res = await client.post('/auth/otp/request/', { email });
+  return res.data;
+}
+
+export async function verifyOtp(email: string, otp: string) {
+  const res = await client.post('/auth/otp/verify/', { email, otp });
+  setAccessToken(res.data.token);
+  try {
+    localStorage.setItem('siem_access_token', res.data.token);
+    const apiUsername = res.data?.user?.username || email;
+    localStorage.setItem('siem_username', apiUsername);
+    if (res.data?.user?.is_readonly) localStorage.setItem('siem_is_readonly', '1');
+    else localStorage.removeItem('siem_is_readonly');
+  } catch (err) {}
+  return res.data;
+}
+
+export async function listRegistrationRequests(params?: { status?: string; email?: string }) {
+  const qp = new URLSearchParams();
+  if (params?.status) qp.set('status', params.status);
+  if (params?.email) qp.set('email', params.email);
+  const suffix = qp.toString() ? `?${qp.toString()}` : '';
+  const res = await client.get(`/accounts/registration-requests/${suffix}`);
+  return res.data;
+}
+
+export async function approveRegistrationRequest(requestId: string, note?: string) {
+  const res = await client.post(`/accounts/registration-requests/${encodeURIComponent(requestId)}/approve/`, {
+    note: note || '',
+  });
+  return res.data;
+}
+
+export async function rejectRegistrationRequest(requestId: string, reason?: string) {
+  const res = await client.post(`/accounts/registration-requests/${encodeURIComponent(requestId)}/reject/`, {
+    reason: reason || '',
+  });
+  return res.data;
+}
+
+export async function getSystemSettings() {
+  const res = await client.get('/accounts/system-settings/');
+  return res.data;
+}
+
+export async function updateSystemSettings(payload: { auto_approve_enabled?: boolean }) {
+  const res = await client.put('/accounts/system-settings/', payload);
+  return res.data;
+}
+
+export type AuditLogQueryParams = {
+  event_type?: string;
+  email?: string;
+  status?: string;
+  from_date?: string;
+  to_date?: string;
+  page?: number;
+  limit?: number;
+  sort?: 'created_at' | '-created_at';
+};
+
+export async function listAuditLogs(params?: AuditLogQueryParams) {
+  const qp = new URLSearchParams();
+  if (params?.event_type) qp.set('event_type', params.event_type);
+  if (params?.email) qp.set('email', params.email);
+  if (params?.status) qp.set('status', params.status);
+  if (params?.from_date) qp.set('from_date', params.from_date);
+  if (params?.to_date) qp.set('to_date', params.to_date);
+  if (params?.page) qp.set('page', String(params.page));
+  if (params?.limit) qp.set('limit', String(params.limit));
+  if (params?.sort) qp.set('sort', params.sort);
+  const suffix = qp.toString() ? `?${qp.toString()}` : '';
+  const res = await client.get(`/accounts/audit-logs/${suffix}`);
   return res.data;
 }
 
@@ -105,15 +233,14 @@ export async function fetchAlerts(
   index?: string,
   opts?: { q?: string; severity?: string; ordering?: string }
 ) {
-  const q = new URLSearchParams();
-  q.set('page', String(page));
-  q.set('page_size', String(page_size));
-  if (index && String(index).trim()) q.set('index', String(index).trim());
-  if (opts?.q && String(opts.q).trim()) q.set('q', String(opts.q).trim());
-  if (opts?.severity && String(opts.severity).trim()) q.set('severity', String(opts.severity).trim());
-  if (opts?.ordering && String(opts.ordering).trim()) q.set('ordering', String(opts.ordering).trim());
-  q.set('_ts', String(Date.now()));
-  const res = await client.get(`/alerts/list/?${q.toString()}`);
+  const qp = new URLSearchParams();
+  qp.set('page', String(page));
+  qp.set('page_size', String(page_size));
+  if (index && String(index).trim()) qp.set('index', String(index).trim());
+  if (opts?.q && String(opts.q).trim()) qp.set('q', String(opts.q).trim());
+  if (opts?.severity && String(opts.severity).trim()) qp.set('severity', String(opts.severity).trim());
+  if (opts?.ordering && String(opts.ordering).trim()) qp.set('ordering', String(opts.ordering).trim());
+  const res = await client.get(`/alerts/list/?${qp.toString()}`);
   return res.data;
 }
 
@@ -1242,4 +1369,3 @@ export async function testInterfaceEndpoint(id: string, payload?: Record<string,
   const r = await client.post(`/interfaces/endpoints/${id}/test/`, payload || { event: 'manual_test' });
   return r.data;
 }
-

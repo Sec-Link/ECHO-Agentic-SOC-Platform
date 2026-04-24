@@ -52,6 +52,8 @@ function iconByKey(key: RouteKey) {
   if (key === 'workflows') return <BranchesOutlined />;
   if (key === 'workflow-executions') return <RadarChartOutlined />;
   if (key === 'permissions') return <LockOutlined />;
+  if (key === 'registration-approvals') return <LockOutlined />;
+  if (key === 'audit-logs') return <LockOutlined />;
   if (key === 'ai-assistant') return <TeamOutlined />;
   return null;
 }
@@ -96,6 +98,8 @@ export default function Sidebar({
     interfaces: labelOverrides.interfaces || 'Interfaces',
     correlation: labelOverrides.correlation || 'Correlation',
     permissions: labelOverrides.permissions || 'Access Management',
+    'registration-approvals': labelOverrides['registration-approvals'] || 'Registration Approvals',
+    'audit-logs': labelOverrides['audit-logs'] || 'Audit Logs',
     workflows: labelOverrides.workflows || 'Workflows',
     'workflow-executions': labelOverrides['workflow-executions'] || 'Workflow Executions',
     'ai-assistant': labelOverrides['ai-assistant'] || 'AI Assistant',
@@ -119,7 +123,7 @@ export default function Sidebar({
       key: 'dataPlatformGroup',
       title: 'Data & Platform',
       icon: <AppstoreOutlined />,
-      items: ['integrations', 'datasources'],
+      items: ['integrations', 'datasources', 'dashboards'],
     },
     {
       key: 'automationGroup',
@@ -128,10 +132,10 @@ export default function Sidebar({
       items: ['correlation', 'orchestrator', 'interfaces', 'workflows', 'workflow-executions'],
     },
     {
-      key: 'adminGroup',
-      title: 'Administration',
+      key: 'systemManagementGroup',
+      title: 'System Management',
       icon: <LockOutlined />,
-      items: ['permissions', 'ai-assistant'],
+      items: ['permissions', 'ai-assistant', 'registration-approvals', 'audit-logs'],
     },
   ];
 

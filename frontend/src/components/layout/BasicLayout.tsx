@@ -170,8 +170,8 @@ export default function BasicLayout({
     else if (['integrations', 'datasources', 'dashboards'].includes(selectedKey)) setOpenKeys(['dataPlatformGroup']);
     else if (['correlation', 'orchestrator', 'interfaces', 'workflows', 'workflow-executions'].includes(selectedKey)) {
       setOpenKeys(['automationGroup']);
-    } else if (['permissions', 'ai-assistant'].includes(selectedKey)) {
-      setOpenKeys(['adminGroup']);
+    } else if (['permissions', 'ai-assistant', 'registration-approvals', 'audit-logs'].includes(selectedKey)) {
+      setOpenKeys(['systemManagementGroup']);
     } else {
       setOpenKeys(['monitorGroup']);
     }
@@ -196,6 +196,8 @@ export default function BasicLayout({
         { key: 'workflows' as RouteKey, label: 'Workflows' },
         { key: 'workflow-executions' as RouteKey, label: 'Workflow Executions' },
         { key: 'permissions' as RouteKey, label: 'Access Management' },
+        { key: 'registration-approvals' as RouteKey, label: 'Registration Approvals' },
+        { key: 'audit-logs' as RouteKey, label: 'Audit Logs' },
         { key: 'ai-assistant' as RouteKey, label: 'AI Assistant' },
       ].filter((item) => canAccess(permissionByKey[item.key])),
     [effectivePermissions, impersonation, rbacMe]
@@ -363,6 +365,7 @@ export default function BasicLayout({
             <HeaderBar
               username={username}
               impersonation={impersonation}
+              isReadonly={!!rbacMe?.is_readonly}
               isDarkTheme={uiTheme === 'dark'}
               onToggleTheme={handleToggleTheme}
               onOpenProfile={() => router.push('/profile')}

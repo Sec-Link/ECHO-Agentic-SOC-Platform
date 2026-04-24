@@ -11,7 +11,7 @@ class IsStaffOrReadOnly(permissions.BasePermission):
 
 
 class UserAdminViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().prefetch_related('groups', 'user_permissions')
+    queryset = User.objects.all().prefetch_related('groups', 'user_permissions', 'user_auth_profile')
     serializer_class = UserAdminSerializer
     permission_classes = [IsStaffOrReadOnly]
 

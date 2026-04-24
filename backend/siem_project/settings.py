@@ -76,6 +76,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'siem_project.token_auth_middleware.DRFTokenAuthMiddleware',
+    'accounts.middleware.ReadonlyWriteBlockMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -161,6 +163,18 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '120/hour',
+        'user': '600/hour',
+        'otp_request': os.getenv('OTP_REQUEST_RATE', '10/hour'),
+        'otp_verify': os.getenv('OTP_VERIFY_RATE', '30/hour'),
+        'audit_logs': os.getenv('AUDIT_LOGS_RATE', '120/hour'),
+    },
 }
 
 AUTHENTICATION_BACKENDS = [
@@ -177,3 +191,37 @@ TASKS = {
 
 # Orchestrator schedule polling window (seconds).
 ORCHESTRATOR_SCHEDULE_INTERVAL_SECONDS = int(os.getenv('ORCHESTRATOR_SCHEDULE_INTERVAL_SECONDS', '30'))
+
+
+# OTP/Auth Registration settings
+OTP_AUTH_ENABLED = os.getenv('OTP_AUTH_ENABLED', 'true').lower() in ('true', '1', 'yes')
+OTP_EXPIRY_MINUTES = int(os.getenv('OTP_EXPIRY_MINUTES', '10'))
+OTP_MAX_ATTEMPTS = int(os.getenv('OTP_MAX_ATTEMPTS', '5'))
+OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv('OTP_RESEND_COOLDOWN_SECONDS', '60'))
+OTP_HASH_SECRET = os.getenv('OTP_HASH_SECRET', SECRET_KEY)
+ADMIN_REGISTRATION_EMAILS = [
+    x.strip() for x in os.getenv('ADMIN_REGISTRATION_EMAILS', '').split(',') if x.strip()
+]
+OTP_EMAIL_RETRY_ATTEMPTS = int(os.getenv('OTP_EMAIL_RETRY_ATTEMPTS', '3'))
+OTP_EMAIL_RETRY_BACKOFF_SECONDS = float(os.getenv('OTP_EMAIL_RETRY_BACKOFF_SECONDS', '1'))
+OTP_EMAIL_COOLDOWN_SECONDS = int(os.getenv('OTP_EMAIL_COOLDOWN_SECONDS', '60'))
+OTP_EMAIL_LIMIT_COUNT = int(os.getenv('OTP_EMAIL_LIMIT_COUNT', '3'))
+OTP_EMAIL_LIMIT_WINDOW_SECONDS = int(os.getenv('OTP_EMAIL_LIMIT_WINDOW_SECONDS', '600'))
+OTP_IP_LIMIT_COUNT = int(os.getenv('OTP_IP_LIMIT_COUNT', '10'))
+OTP_IP_LIMIT_WINDOW_SECONDS = int(os.getenv('OTP_IP_LIMIT_WINDOW_SECONDS', '300'))
+REJECT_ADMIN_LIMIT_COUNT = int(os.getenv('REJECT_ADMIN_LIMIT_COUNT', '30'))
+REJECT_ADMIN_LIMIT_WINDOW_SECONDS = int(os.getenv('REJECT_ADMIN_LIMIT_WINDOW_SECONDS', '3600'))
+REJECT_IP_LIMIT_COUNT = int(os.getenv('REJECT_IP_LIMIT_COUNT', '30'))
+REJECT_IP_LIMIT_WINDOW_SECONDS = int(os.getenv('REJECT_IP_LIMIT_WINDOW_SECONDS', '3600'))
+AUDIT_LOG_RETENTION_DAYS = int(os.getenv('AUDIT_LOG_RETENTION_DAYS', '90'))
+
+# Email delivery settings
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() in ('true', '1', 'yes')
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'false').lower() in ('true', '1', 'yes')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'noreply@localhost')
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
