@@ -290,3 +290,34 @@ class OTPRegistrationFlowTests(TestCase):
         resp = self.client.post("/api/v1/auth/otp/request/", {"email": "otp.no.req@example.com"}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(any("login code" in m.subject.lower() for m in mail.outbox))
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST="",
+        EMAIL_USE_TLS=True,
+    )
+    def test_otp_request_with_missing_smtp_host_fails_gracefully(self):
+        self.client.post("/api/v1/auth/register-email/", {"email": "smtp.missing@example.com"}, format="json")
+        req = RegistrationRequest.objects.get(email="smtp.missing@example.com")
+
+        admin_client = APIClient()
+        admin_login = admin_client.post(
+            "/api/v1/auth/login/",
+            {"username": "admin", "password": "Password123!"},
+            format="json",
+        )
+        admin_client.credentials(HTTP_AUTHORIZATION=f"Token {admin_login.data['token']}")
+        approve_resp = admin_client.post(f"/api/v1/accounts/registration-requests/{req.id}/approve/", {}, format="json")
+        self.assertEqual(approve_resp.status_code, 200)
+
+        resp = self.client.post("/api/v1/auth/otp/request/", {"email": "smtp.missing@example.com"}, format="json")
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.data.get("error"), "otp_send_failed")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                event_type=AuditLog.EventType.EMAIL_SENT,
+                user_email="smtp.missing@example.com",
+                status=AuditLog.Status.FAILURE,
+                failure_reason="smtp_host_missing",
+            ).exists()
+        )

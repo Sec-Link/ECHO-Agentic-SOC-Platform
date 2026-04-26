@@ -115,6 +115,18 @@ def otp_email_retry_backoff_seconds() -> float:
         return 1.0
 
 
+def _smtp_config_failure_reason() -> Optional[str]:
+    backend = str(getattr(settings, "EMAIL_BACKEND", "") or "")
+    if backend != "django.core.mail.backends.smtp.EmailBackend":
+        return None
+    host = str(getattr(settings, "EMAIL_HOST", "") or "").strip()
+    if not host:
+        return "smtp_host_missing"
+    if getattr(settings, "EMAIL_USE_TLS", False) and getattr(settings, "EMAIL_USE_SSL", False):
+        return "smtp_tls_ssl_conflict"
+    return None
+
+
 def _send_mail_with_retry(*, subject: str, message: str, recipients: list[str], context: dict) -> bool:
     if not recipients:
         logger.warning("No recipients provided for email send", extra={"context": context})
@@ -124,6 +136,32 @@ def _send_mail_with_retry(*, subject: str, message: str, recipients: list[str], 
             user_email=recipients[0] if recipients else None,
             failure_reason="no_recipients",
             metadata={**context, "recipient_count": len(recipients or [])},
+        )
+        return False
+
+    smtp_config_reason = _smtp_config_failure_reason()
+    if smtp_config_reason:
+        logger.error(
+            "Email send skipped due to SMTP configuration error",
+            extra={
+                "context": {
+                    **context,
+                    "failure_reason": smtp_config_reason,
+                    "recipients": recipients,
+                }
+            },
+        )
+        AuditService.log_safe(
+            event_type="email_sent",
+            status="failure",
+            user_email=recipients[0] if recipients else None,
+            failure_reason=smtp_config_reason,
+            metadata={
+                **context,
+                "recipient_count": len(recipients),
+                "email_backend": str(getattr(settings, "EMAIL_BACKEND", "") or ""),
+                "email_host_configured": bool(str(getattr(settings, "EMAIL_HOST", "") or "").strip()),
+            },
         )
         return False
 
