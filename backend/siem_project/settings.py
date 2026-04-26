@@ -171,8 +171,8 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.ScopedRateThrottle',
     ),
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '120/hour',
-        'user': '600/hour',
+        'anon': os.getenv('DRF_THROTTLE_ANON_RATE', '60/min'),
+        'user': os.getenv('DRF_THROTTLE_USER_RATE', '600/min'),
         'otp_request': os.getenv('OTP_REQUEST_RATE', '10/hour'),
         'otp_verify': os.getenv('OTP_VERIFY_RATE', '30/hour'),
         'audit_logs': os.getenv('AUDIT_LOGS_RATE', '120/hour'),

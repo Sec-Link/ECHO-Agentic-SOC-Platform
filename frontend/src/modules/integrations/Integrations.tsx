@@ -1,10 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react'
 import { List, Button, Modal, Form, Input, Card, Space, Tag, message, Select, Divider } from 'antd'
 import {
-  integrationsDbTables,
-  integrationsCreateTable,
-  integrationsCreateTableFromEs,
-  integrationsPreviewEsMapping,
   testEsIntegration,
   testLogstashIntegration,
   testAirflowIntegration,
@@ -29,17 +25,6 @@ const Integrations: React.FC = () =>{
   const [showModal, setShowModal] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [form] = Form.useForm()
-  const [availableTables, setAvailableTables] = useState<string[]>([])
-  const [showCreateTableModal, setShowCreateTableModal] = useState(false)
-  const [creatingTableName, setCreatingTableName] = useState('es_imports')
-  const [modalEsIntegrationId, setModalEsIntegrationId] = useState<string | undefined>(undefined)
-  const [modalIndexName, setModalIndexName] = useState<string | undefined>(undefined)
-  const [previewColumns, setPreviewColumns] = useState<any[] | null>(null)
-  const [showPreviewModal, setShowPreviewModal] = useState(false)
-  const [editedColumns, setEditedColumns] = useState<any[] | null>(null)
-  const [pendingMapping, setPendingMapping] = useState<any[] | null>(null)
-  const PG_TYPE_OPTIONS = ['text','integer','bigint','smallint','real','double precision','numeric','boolean','timestamptz','timestamp','date','jsonb','json']
-  const MYSQL_TYPE_OPTIONS = ['TEXT','INT','BIGINT','SMALLINT','DOUBLE','TINYINT(1)','DATETIME','JSON','VARCHAR(255)']
 
   useEffect(()=>{ fetchList() }, [])
 
@@ -72,40 +57,10 @@ const Integrations: React.FC = () =>{
     throw new Error('Unsupported integration type')
   }
 
-  // Build payload from current form values and call the backend to list tables
-  // Reads connection info from the form and builds payload (conn_str or host/user/password/...).
-  // Returns: table list from integrationsDbTables stored in availableTables.
-  // For non-DB types (not postgresql/mysql), returns without request.
-  const fetchTablesFromForm = async () => {
-    try{
-      const v = form.getFieldsValue()
-      if(!(v.type === 'postgresql' || v.type === 'mysql')) return
-      const payload: any = { db_type: v.type === 'postgresql' ? 'postgres' : 'mysql' }
-      if(v.conn_str) payload.conn_str = v.conn_str
-      else{
-        payload.host = v.host || ''
-        payload.user = v.user || v.username || ''
-        payload.password = v.password || ''
-        payload.database = v.dbname || v.database || ''
-        payload.port = v.port || ''
-        payload.django_db = v.django_db || undefined
-      }
-      // if editing an existing integration, include its id so backend can use saved config
-      if(editingIndex !== null){ payload.integration = items[editingIndex].id }
-      const res = await integrationsDbTables(payload)
-      if(res && res.tables) setAvailableTables(res.tables)
-      else setAvailableTables([])
-    }catch(e:any){
-      // keep availableTables as-is but show a small warning
-      message.warning('Could not fetch tables: ' + (e.message || String(e)))
-    }
-  }
-
   const save = async ()=>{
     const v = await form.validateFields()
     try{
       // Collect form values and build create/update integration payload.
-      // If pendingMapping exists (previewed/edited during create table), write mapping to payload.config.columns.
       const payload: any = { name: v.name, type: v.type, config: {} }
       if(v.type === 'elasticsearch'){
         payload.config = { host: v.host || '', username: v.username || '', password: v.password || '' }
@@ -124,10 +79,6 @@ const Integrations: React.FC = () =>{
           django_db: v.django_db || undefined,
           table: v.table || undefined,
         }
-        // if user created a table from ES for a new integration, include pending mapping
-        if(pendingMapping && pendingMapping.length){
-          payload.config.columns = pendingMapping.map((c:any)=> ({ orig_name: c.orig_name, colname: c.colname, sql_type: c.sql_type }))
-        }
       }else{
         payload.config = { ...(v.config || {}), host: v.host }
       }
@@ -144,7 +95,6 @@ const Integrations: React.FC = () =>{
       setShowModal(false)
       setEditingIndex(null)
       form.resetFields()
-      setPendingMapping(null)
       fetchList()
     }catch(e:any){ message.error(String(e)) }
   }
@@ -154,12 +104,6 @@ const Integrations: React.FC = () =>{
       const v = form.getFieldsValue()
       await testIntegration(v)
       message.success('Connection OK')
-      if(v.type === 'postgresql' || v.type === 'mysql'){
-        try{
-          // fetch table list using helper so we keep logic consistent
-          await fetchTablesFromForm()
-        }catch(e:any){ message.warning('Could not fetch tables: ' + (e.message || String(e))) }
-      }
     }catch(e:any){ message.error('Connection failed: ' + (e.message || String(e))) }
   }
 
@@ -186,108 +130,6 @@ const Integrations: React.FC = () =>{
     }
     form.setFieldsValue(merged)
     setShowModal(true)
-    // attempt to fetch tables for this integration right away
-    setTimeout(()=>{ fetchTablesFromForm().catch(()=>{}) }, 50)
-  }
-
-  const handleCreateTable = async ()=>{
-    try{
-      const v = form.getFieldsValue()
-      const payload: any = { table: creatingTableName }
-      payload.db_type = v.type === 'postgresql' ? 'postgres' : 'mysql'
-      if(v.conn_str) payload.conn_str = v.conn_str
-      else{
-        payload.host = v.host || ''
-        payload.user = v.user || v.username || ''
-        payload.password = v.password || ''
-        payload.database = v.dbname || v.database || ''
-        payload.port = v.port || ''
-        payload.django_db = v.django_db || undefined
-      }
-      if(editingIndex !== null){ payload.integration = items[editingIndex].id }
-      const res = await integrationsCreateTable(payload)
-      if(res && res.ok){
-        message.success('Table created: ' + res.table)
-        try{
-          const tablesRes = await integrationsDbTables(payload)
-          if(tablesRes && tablesRes.tables) setAvailableTables(tablesRes.tables)
-          form.setFieldsValue({ table: res.table })
-        }catch(_){ }
-        setShowCreateTableModal(false)
-      }else{
-        message.error('Create table failed: ' + JSON.stringify(res))
-      }
-    }catch(e:any){ message.error(String(e)) }
-  }
-
-  const createTableFromEs = async (esIntegrationId?: string, indexName?: string) => {
-    try{
-      const v = form.getFieldsValue()
-      const payload: any = { table: creatingTableName }
-      // include connection info as before
-      payload.db_type = v.type === 'postgresql' ? 'postgres' : 'mysql'
-      if(v.conn_str) payload.conn_str = v.conn_str
-      else{
-        payload.host = v.host || ''
-        payload.user = v.user || v.username || ''
-        payload.password = v.password || ''
-        payload.database = v.dbname || v.database || ''
-        payload.port = v.port || ''
-        payload.django_db = v.django_db || undefined
-      }
-      if(esIntegrationId) payload.alerts = esIntegrationId
-      if(indexName) payload.index = indexName
-      // ask backend to persist mapping file for this create-from-es action
-      try{
-        const suggestedName = `create_from_es_${esIntegrationId || 'es'}_${(indexName || 'index')}.json`
-        payload.save_to_file = true
-        payload.filename = suggestedName
-      }catch(_){ }
-      // include edited columns if the user previewed and edited them
-      // If the user edited column names/types in the preview modal, send edited metadata to create typed table
-      if(editedColumns && editedColumns.length > 0){
-        payload.columns = editedColumns.map(c=>({ orig_name: c.orig_name, colname: c.colname, sql_type: c.sql_type }))
-      }
-      // if editing an existing (destination) integration, tell backend which integration to reuse
-      if(editingIndex !== null){ payload.integration = items[editingIndex].id }
-      const res = await integrationsCreateTableFromEs(payload)
-      if(res && res.ok){
-          if(res.saved_path){
-            message.success('Mapping saved to: ' + res.saved_path)
-          }
-        message.success('Table created from ES mapping: ' + res.table)
-        try{
-          const tablesRes = await integrationsDbTables(payload)
-          if(tablesRes && tablesRes.tables) setAvailableTables(tablesRes.tables)
-          form.setFieldsValue({ table: res.table })
-        }catch(_){ }
-      // When editing an existing integration, try to save returned columns mapping to its config
-        if(editingIndex !== null){
-          try{
-            const existing = items[editingIndex]
-            const updatedConfig = { ...(existing.config || {}), table: res.table }
-            if(res.columns && res.columns.length){
-              // ensure columns are stored as array of { orig_name, colname, sql_type }
-              updatedConfig.columns = (res.columns || []).map((c:any)=> ({ orig_name: c.orig_name || c.orig || c.origName || c.name, colname: c.colname || c.name, sql_type: c.sql_type || c.sqlType || null }))
-            }
-            const updatePayload:any = { name: existing.name, type: existing.type, config: updatedConfig }
-            await updateIntegration(existing.id, updatePayload)
-            // refresh list and form to reflect saved mapping
-            fetchList()
-            form.setFieldsValue({ table: res.table })
-            message.info('Saved mapping to integration config')
-          }catch(e:any){ message.warning('Could not save mapping to integration: ' + (e.message || String(e))) }
-        }
-        else{
-          // When creating a table for a new integration (not yet saved), store columns in pendingMapping
-          // pendingMapping will be persisted to integration.config.columns on save
-          if(res.columns && res.columns.length){ setPendingMapping(res.columns) }
-        }
-        setShowCreateTableModal(false)
-      }else{
-        message.error('Create table failed: ' + JSON.stringify(res))
-      }
-    }catch(e:any){ message.error(String(e)) }
   }
 
   return (
@@ -424,7 +266,6 @@ const Integrations: React.FC = () =>{
                           Modal.info({ title: 'Logstash config preview', width: 700, content: (<pre style={{ whiteSpace: 'pre-wrap' }}>{txt}</pre>) })
                         }}>Preview Logstash Config</Button>
                       </Form.Item>
-                      <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>If the list is empty, click "Test Connection" or "Refresh" after entering DB details.</div>
                     </>
                   )}
 
@@ -439,12 +280,12 @@ const Integrations: React.FC = () =>{
 
                   {(t === 'postgresql' || t === 'mysql') && (
                     <>
-                      <Form.Item name="conn_str" label="Connection string (optional)"><Input placeholder="e.g. postgresql://user:pass@host:5432/dbname" onBlur={()=>fetchTablesFromForm()} /></Form.Item>
-                      <Form.Item name="port" label="Port"><Input onBlur={()=>fetchTablesFromForm()} /></Form.Item>
-                      <Form.Item name="user" label="User"><Input onBlur={()=>fetchTablesFromForm()} /></Form.Item>
+                      <Form.Item name="conn_str" label="Connection string (optional)"><Input placeholder="e.g. postgresql://user:pass@host:5432/dbname" /></Form.Item>
+                      <Form.Item name="port" label="Port"><Input /></Form.Item>
+                      <Form.Item name="user" label="User"><Input /></Form.Item>
                       <Form.Item name="password" label="Password"><Input.Password /></Form.Item>
-                      <Form.Item name="dbname" label="Database"><Input onBlur={()=>fetchTablesFromForm()} /></Form.Item>
-                      <Form.Item name="django_db" label="Django DB alias (optional)"><Input placeholder="e.g. default" onBlur={()=>fetchTablesFromForm()} /></Form.Item>
+                      <Form.Item name="dbname" label="Database"><Input /></Form.Item>
+                      <Form.Item name="django_db" label="Django DB alias (optional)"><Input placeholder="e.g. default" /></Form.Item>
                     </>
                   )}
                 </>
@@ -466,4 +307,3 @@ const Integrations: React.FC = () =>{
   )
 }
 export default Integrations;
-

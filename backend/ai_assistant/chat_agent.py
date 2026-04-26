@@ -143,7 +143,8 @@ def _call_openai_chat(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    res = requests.post(url, headers=headers, json=payload, timeout=cfg["timeout"], stream=True)
+    timeout = cfg.get("timeout", 30)
+    res = requests.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
     res.encoding = "utf-8"
     if res.status_code >= 400:
         raise RuntimeError(f"OpenAI chat error: {res.status_code} {res.text[:500]}")

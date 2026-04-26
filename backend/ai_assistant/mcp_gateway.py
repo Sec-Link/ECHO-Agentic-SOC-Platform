@@ -342,6 +342,7 @@ def _normalize_tool_name(name: str) -> str:
 def _initialize_mcp_session(config: Dict[str, Any], base_headers: Dict[str, str]) -> Dict[str, str]:
     request_url = str(config.get("base_url", "")).rstrip("/")
     headers = dict(base_headers)
+    timeout = _timeout(config)
     try:
         init_payload = {
             "jsonrpc": "2.0",
@@ -360,7 +361,7 @@ def _initialize_mcp_session(config: Dict[str, Any], base_headers: Dict[str, str]
             request_url,
             headers=headers,
             json=init_payload,
-            timeout=_timeout(config),
+            timeout=timeout,
         )
         session_id = (
             init_res.headers.get("mcp-session-id")
@@ -381,7 +382,7 @@ def _initialize_mcp_session(config: Dict[str, Any], base_headers: Dict[str, str]
                 request_url,
                 headers=headers,
                 json=notif_payload,
-                timeout=_timeout(config),
+                timeout=timeout,
             )
         except Exception:
             pass
@@ -445,6 +446,7 @@ def _get_endpoint_tools(config: Dict[str, Any]) -> List[str] | None:
 
     request_url = str(config.get("base_url", "")).rstrip("/")
     headers = _initialize_mcp_session(config, _headers(config))
+    timeout = _timeout(config)
     method_candidates = ["tools/list", "tools.list", "list_tools"]
     meta: List[Dict[str, Any]] = []
     for method_name in method_candidates:
@@ -458,7 +460,7 @@ def _get_endpoint_tools(config: Dict[str, Any]) -> List[str] | None:
             request_url,
             headers=headers,
             json=payload,
-            timeout=_timeout(config),
+            timeout=timeout,
         )
         if res.status_code >= 400:
             continue
@@ -504,6 +506,7 @@ def _get_endpoint_tool_meta(config: Dict[str, Any]) -> List[Dict[str, Any]] | No
 def _list_mcp_tools_jsonrpc(config: Dict[str, Any]) -> tuple[List[str], int | None, str]:
     request_url = str(config.get("base_url", "")).rstrip("/")
     headers = _initialize_mcp_session(config, _headers(config))
+    timeout = _timeout(config)
 
     method_candidates = ["tools/list", "tools.list", "list_tools"]
     last_status: int | None = None
@@ -519,7 +522,7 @@ def _list_mcp_tools_jsonrpc(config: Dict[str, Any]) -> tuple[List[str], int | No
             request_url,
             headers=headers,
             json=payload,
-            timeout=_timeout(config),
+            timeout=timeout,
         )
         last_status = res.status_code
         if res.status_code >= 400:
@@ -900,6 +903,7 @@ def _call_mcp_tool_jsonrpc(
     base_url = str(config.get("base_url", "")).rstrip("/")
     request_url = base_url
     base_headers = _initialize_mcp_session(config, _headers(config))
+    timeout = _timeout(config)
 
     # Use MCP-standard method first; keep only minimal compatibility fallback.
     method_candidates = ["tools/call", "tools.call"]
@@ -927,7 +931,7 @@ def _call_mcp_tool_jsonrpc(
                 request_url,
                 headers=base_headers,
                 json=payload,
-                timeout=_timeout(config),
+                timeout=timeout,
             )
             last_status = res.status_code
             if res.status_code >= 400:
@@ -994,6 +998,7 @@ def fetch_ticket_context(ticket_number: str, overrides: Dict[str, Any] | None = 
         path = str(cfg.get("ticket_context_path") or "/ticket-context/{ticket_number}")
         path = path.format(ticket_number=quote(str(ticket_number), safe=""))
         url = _full_url(path, cfg)
+        timeout = _timeout(cfg)
         try:
             if _is_mcp_jsonrpc_endpoint(cfg):
                 payload, http_status, err, rpc_req, rpc_resp = _call_mcp_tool_jsonrpc(
@@ -1025,7 +1030,7 @@ def fetch_ticket_context(ticket_number: str, overrides: Dict[str, Any] | None = 
                 )
                 continue
 
-            res = requests.get(url, headers=_headers(cfg), timeout=_timeout(cfg))
+            res = requests.get(url, headers=_headers(cfg), timeout=timeout)
             if res.status_code >= 400:
                 logger.warning("MCP ticket context failed: %s %s", res.status_code, res.text[:600])
                 _record_monitor(
@@ -1097,6 +1102,7 @@ def fetch_similar_cases(
     for cfg in configs:
         path = str(cfg.get("ticket_search_path") or "/ticket-search/similar-cases")
         url = _full_url(path, cfg)
+        timeout = _timeout(cfg)
         try:
             if _is_mcp_jsonrpc_endpoint(cfg):
                 tool_payload, http_status, err, rpc_req, rpc_resp = _call_mcp_tool_jsonrpc(
@@ -1142,7 +1148,7 @@ def fetch_similar_cases(
                 )
                 continue
 
-            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=_timeout(cfg))
+            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=timeout)
             if res.status_code >= 400:
                 logger.warning("MCP ticket search failed: %s %s", res.status_code, res.text[:600])
                 _record_monitor(
@@ -1226,6 +1232,7 @@ def fetch_cmdb_assets(
     for cfg in configs:
         path = str(cfg.get("cmdb_lookup_path") or "/cmdb/asset-lookup")
         url = _full_url(path, cfg)
+        timeout = _timeout(cfg)
         try:
             if _is_mcp_jsonrpc_endpoint(cfg):
                 tool_payload, http_status, err, rpc_req, rpc_resp = _call_mcp_tool_jsonrpc(
@@ -1271,7 +1278,7 @@ def fetch_cmdb_assets(
                 )
                 continue
 
-            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=_timeout(cfg))
+            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=timeout)
             if res.status_code >= 400:
                 logger.warning("MCP cmdb lookup failed: %s %s", res.status_code, res.text[:600])
                 _record_monitor(
@@ -1360,6 +1367,7 @@ def fetch_observables(
     for cfg in configs:
         path = str(cfg.get("observables_extract_path") or "/observables/extract")
         url = _full_url(path, cfg)
+        timeout = _timeout(cfg)
         try:
             if _is_mcp_jsonrpc_endpoint(cfg):
                 tool_payload, http_status, err, rpc_req, rpc_resp = _call_mcp_tool_jsonrpc(
@@ -1391,7 +1399,7 @@ def fetch_observables(
                 )
                 continue
 
-            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=_timeout(cfg))
+            res = requests.post(url, headers=_headers(cfg), json=payload, timeout=timeout)
             if res.status_code >= 400:
                 logger.warning("MCP observables extract failed: %s %s", res.status_code, res.text[:600])
                 _record_monitor(

@@ -32,9 +32,15 @@ os.makedirs(TASK_REQUESTS_DIR, exist_ok=True)
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all().order_by('-created_at')
     serializer_class = TaskSerializer
+    DEST_TABLE = "alerts_alert"
+
+    def _normalize_config(self, config):
+        cfg = dict(config or {})
+        cfg["table"] = self.DEST_TABLE
+        return cfg
 
     def perform_create(self, serializer):
-        task = serializer.save()
+        task = serializer.save(config=self._normalize_config(serializer.validated_data.get("config")))
         # generate task config and DAG immediately
         self._generate_task_files(task)
         # persist the incoming request payload to disk for auditing/debug
@@ -45,7 +51,7 @@ class TaskViewSet(viewsets.ModelViewSet):
             pass
 
     def perform_update(self, serializer):
-        task = serializer.save()
+        task = serializer.save(config=self._normalize_config(serializer.validated_data.get("config")))
         self._generate_task_files(task)
         # persist update payload
         try:
@@ -140,11 +146,6 @@ class TaskViewSet(viewsets.ModelViewSet):
             if getattr(_dj_settings, 'WRITE_CONFIG_TO_DISK', False):
                 with open(runner_sh, 'w', encoding='utf-8') as fr:
                     fr.write(runner_content)
-                # make executable if possible
-                try:
-                    os.chmod(runner_sh, 0o755)
-                except Exception:
-                    pass
         except Exception:
             pass
 

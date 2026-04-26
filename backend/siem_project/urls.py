@@ -20,7 +20,7 @@ from accounts.views import LoginAPIView, LogoutAPIView, RegisterAPIView, Registe
 from dashboards.views import DashboardViewSet
 from integrations.views import test_es_connection
 from integrations.views import IntegrationViewSet, preview_es_index
-from integrations.views import integrations_db_tables, integrations_create_table, integrations_create_table_from_es, integrations_preview_es_mapping
+from integrations.views import integrations_preview_es_mapping
 from rest_framework import routers
 from ai_assistant.mcp_views import mcp_ticket_context, mcp_ticket_search_similar_cases, mcp_cmdb_asset_lookup, mcp_observables_extract
 from ai_assistant.mcp_protocol_views import mcp_rpc, mcp_tools_manifest
@@ -72,9 +72,6 @@ urlpatterns = [
     path('api/v1/', include(router.urls)),  
     path('api/v1/integrations/test_es', test_es_connection),
     path('api/v1/integrations/preview_es', preview_es_index),
-    path('api/v1/integrations/db_tables', integrations_db_tables),
-    path('api/v1/integrations/create_table', integrations_create_table),
-    path('api/v1/integrations/create_table_from_es', integrations_create_table_from_es),
     path('api/v1/integrations/preview_es_mapping', integrations_preview_es_mapping),
     # Tickets API (v1, versioned like alerts)
     path('api/v1/tickets/', include('tickets.urls')),

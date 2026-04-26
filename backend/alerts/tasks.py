@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import logging
 import os
-import json
 import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from django.db import DatabaseError, IntegrityError, connection, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone as django_timezone
 
@@ -198,73 +197,33 @@ def _create_or_update_index_table(index: str, docs: List[Dict[str, Any]]) -> Dic
     if not docs:
         return {"ok": False, "table": None, "imported": 0, "detail": "no docs"}
 
-    table = _sanitize_index_table_name(index)
-    q_table = connection.ops.quote_name(table)
-    q_idx = connection.ops.quote_name(f"{table}_alert_id_uidx")
-
     imported = 0
-    with connection.cursor() as cur:
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {q_table} (
-                id bigserial PRIMARY KEY,
-                alert_id text,
-                timestamp timestamptz NULL,
-                severity text NULL,
-                message text NULL,
-                source_index text NULL,
-                rule_id text NULL,
-                title text NULL,
-                status integer NULL,
-                description text NULL,
-                category text NULL,
-                source_data jsonb NULL,
-                created_at timestamptz DEFAULT now()
-            )
-            """
+    index_name = (index or '').strip() or 'alerts'
+    for doc in docs:
+        alert_id = doc.get('alert_id')
+        if not alert_id:
+            continue
+
+        defaults = {
+            'timestamp': _parse_es_timestamp(doc.get('timestamp')),
+            'severity': doc.get('severity'),
+            'message': doc.get('message'),
+            'source_index': doc.get('source_index') or index_name,
+            'rule_id': doc.get('rule_id'),
+            'title': doc.get('title'),
+            'status': _coerce_int(doc.get('status')),
+            'description': doc.get('description'),
+            'category': doc.get('category'),
+            'source_data': doc,
+        }
+        Alert.objects.update_or_create(
+            alert_id=alert_id,
+            source_index=index_name,
+            defaults=defaults,
         )
-        cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {q_idx} ON {q_table} (alert_id)")
+        imported += 1
 
-        upsert_sql = (
-            f"INSERT INTO {q_table} "
-            "(alert_id, timestamp, severity, message, source_index, rule_id, title, status, description, category, source_data) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (alert_id) DO UPDATE SET "
-            "timestamp = EXCLUDED.timestamp, "
-            "severity = EXCLUDED.severity, "
-            "message = EXCLUDED.message, "
-            "source_index = EXCLUDED.source_index, "
-            "rule_id = EXCLUDED.rule_id, "
-            "title = EXCLUDED.title, "
-            "status = EXCLUDED.status, "
-            "description = EXCLUDED.description, "
-            "category = EXCLUDED.category, "
-            "source_data = EXCLUDED.source_data"
-        )
-
-        for doc in docs:
-            alert_id = doc.get('alert_id')
-            if not alert_id:
-                continue
-            cur.execute(
-                upsert_sql,
-                [
-                    alert_id,
-                    _parse_es_timestamp(doc.get('timestamp')),
-                    doc.get('severity'),
-                    doc.get('message'),
-                    doc.get('source_index'),
-                    doc.get('rule_id'),
-                    doc.get('title'),
-                    _coerce_int(doc.get('status')),
-                    doc.get('description'),
-                    doc.get('category'),
-                    json.dumps(doc),
-                ],
-            )
-            imported += 1
-
-    return {"ok": True, "table": table, "imported": imported}
+    return {"ok": True, "table": "alerts_alert", "imported": imported}
 
 
 def _log_es_diagnostics(cfg: ESIntegrationConfig, index: str) -> List[str]:
@@ -317,29 +276,34 @@ def _log_es_diagnostics(cfg: ESIntegrationConfig, index: str) -> List[str]:
 def _deduplicate_alerts_for_index(index_name: str | None) -> int:
     if not index_name:
         return 0
-    with connection.cursor() as cur:
-        cur.execute(
-            """
-            WITH ranked AS (
-                SELECT
-                    id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY alert_id
-                        ORDER BY timestamp DESC NULLS LAST, id DESC
-                    ) AS rn
-                FROM alerts_alert
-                WHERE source_index = %s
-                  AND alert_id IS NOT NULL
-                  AND alert_id <> ''
-            )
-            DELETE FROM alerts_alert a
-            USING ranked r
-            WHERE a.id = r.id
-              AND r.rn > 1
-            """,
-            [index_name],
-        )
-        return cur.rowcount or 0
+    seen: set[str] = set()
+    delete_ids: List[int] = []
+    rows = Alert.objects.filter(
+        source_index=index_name,
+    ).exclude(
+        alert_id__isnull=True,
+    ).exclude(
+        alert_id='',
+    ).order_by(
+        'alert_id',
+        '-timestamp',
+        '-id',
+    ).values(
+        'id',
+        'alert_id',
+    )
+    for row in rows:
+        alert_id = row.get('alert_id')
+        if not alert_id:
+            continue
+        if alert_id in seen:
+            delete_ids.append(row['id'])
+        else:
+            seen.add(alert_id)
+    if not delete_ids:
+        return 0
+    deleted, _ = Alert.objects.filter(id__in=delete_ids).delete()
+    return int(deleted or 0)
 
 
 def _backfill_missing_alert_ids(index_name: str | None = None, limit: int = 5000) -> int:

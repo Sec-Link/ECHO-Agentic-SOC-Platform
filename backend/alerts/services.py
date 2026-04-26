@@ -14,8 +14,6 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 import logging
 import inspect
-import urllib.request
-import urllib.error
 import base64
 import time
 import threading
@@ -120,7 +118,7 @@ def _compute_alert_identity(doc: Dict, fallback_index: str | None = None) -> str
         'doc': doc,
     }
     raw = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
-    digest = hashlib.sha1(raw.encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()
     return f"fp_{digest}"[:64]
 
 
@@ -129,7 +127,7 @@ def _ensure_alert_identity(doc: Dict, fallback_index: str | None = None) -> str:
     if aid:
         return aid
     raw = json.dumps({'doc': doc, 'idx': fallback_index}, sort_keys=True, default=str, ensure_ascii=True)
-    return f"fp_{hashlib.sha1(raw.encode('utf-8')).hexdigest()}"[:64]
+    return f"fp_{hashlib.sha256(raw.encode('utf-8')).hexdigest()}"[:64]
 
 
 def _serialize_alert_row(row: Alert) -> Dict:
@@ -202,13 +200,13 @@ def _detect_es_major_version(host_url: str, timeout: int = 5) -> int:
             host_url = 'http://' + host_url
         if not host_url.endswith('/'):
             host_url = host_url + '/'
-        with urllib.request.urlopen(host_url, timeout=timeout) as resp:
-            body = resp.read()
-            data = json.loads(body.decode('utf-8'))
-            ver = data.get('version', {}).get('number')
-            if ver:
-                major = int(str(ver).split('.')[0])
-                return major
+        resp = requests.get(host_url, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        ver = data.get('version', {}).get('number')
+        if ver:
+            major = int(str(ver).split('.')[0])
+            return major
     except Exception as e:
         logger.debug('ES version detection failed for %s: %s', host_url, e)
     return 8  # sensible default

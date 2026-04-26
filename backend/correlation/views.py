@@ -4,9 +4,10 @@ from rest_framework.permissions import IsAuthenticated
 from accounts.permissions import HasDjangoPermissions
 from datetime import datetime, timedelta
 from django.utils import timezone
-from django.db import connection
+from django.db.models import Count, Max
 from .models import CorrelationPolicy, CorrelationEvent
 from .serializers import CorrelationPolicySerializer
+from alerts.models import Alert
 try:
     from orchestrator.utils import seed_correlation_events
 except Exception:
@@ -90,77 +91,47 @@ class CorrelationEventsView(APIView):
         series = []
         table = []
 
-        def get_columns(cur, table_name):
-            cur.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = %s
-                """,
-                [table_name],
+        alerts_qs = Alert.objects.filter(
+            timestamp__isnull=False,
+            timestamp__gte=from_ts,
+            timestamp__lte=to_ts,
+        ).exclude(
+            ticket_number__isnull=True,
+        ).exclude(
+            ticket_number='',
+        )
+        ticket_rows = list(
+            alerts_qs.values('ticket_number')
+            .annotate(alert_count=Count('id'), last_alert_time=Max('timestamp'))
+            .order_by('-last_alert_time')[:100]
+        )
+        for row in ticket_rows:
+            top_alert = alerts_qs.filter(ticket_number=row['ticket_number']).order_by('-timestamp', '-id').first()
+            ticket_alert_ids = list(
+                alerts_qs.filter(ticket_number=row['ticket_number'])
+                .exclude(alert_id__isnull=True)
+                .exclude(alert_id='')
+                .values_list('alert_id', flat=True)
             )
-            return {r[0] for r in cur.fetchall()}
+            table.append({
+                'ticket_id': row['ticket_number'],
+                'alert_count': row['alert_count'],
+                'last_alert_time': row['last_alert_time'].isoformat() if row['last_alert_time'] else None,
+                'top_threat_object': (top_alert.title if top_alert else None),
+                'top_rule': (top_alert.rule_id if top_alert else None),
+                'alert_ids': ticket_alert_ids,
+            })
 
-        with connection.cursor() as cur:
-            columns = get_columns(cur, 'alerts')
-            time_col = 'timestamp' if 'timestamp' in columns else ('date' if 'date' in columns else None)
-            ticket_col = 'ticket_number' if 'ticket_number' in columns else None
-            risk_col = 'risk_object' if 'risk_object' in columns else ('title' if 'title' in columns else None)
-            rule_col = 'rule_id' if 'rule' in columns else ('alert_type' if 'alert_type' in columns else ('signature' if 'signature' in columns else None))
-            alert_id_col = 'alert_id' if 'alert_id' in columns else None
-
-            if time_col and ticket_col:
-                time_expr = f'"{time_col}"'
-                risk_expr = f'"{risk_col}"' if risk_col else 'NULL'
-                rule_expr = f'"{rule_col}"' if rule_col else 'NULL'
-                alert_expr = f'"{alert_id_col}"' if alert_id_col else 'NULL'
-
-                cur.execute(
-                    f"""
-                    SELECT
-                        to_timestamp(floor(extract(epoch from {time_expr}) / %s) * %s) AT TIME ZONE 'UTC' AS bucket_time,
-                        count(distinct {ticket_col}) AS cnt
-                    FROM alerts0119
-                    WHERE {time_expr} IS NOT NULL
-                      AND {time_expr} >= %s AND {time_expr} <= %s
-                      AND {ticket_col} IS NOT NULL
-                    GROUP BY bucket_time
-                    ORDER BY bucket_time
-                    """,
-                    [bucket_seconds, bucket_seconds, from_ts, to_ts],
-                )
-                bucket_rows = cur.fetchall()
-
-                cur.execute(
-                    f"""
-                    SELECT
-                        {ticket_col},
-                        count(*) AS alert_count,
-                        max({time_expr}) AS last_alert_time,
-                        (array_agg({risk_expr} ORDER BY {time_expr} DESC))[1] AS risk_object,
-                        (array_agg({rule_expr} ORDER BY {time_expr} DESC))[1] AS rule_name,
-                        array_agg({alert_expr}) AS alert_ids
-                    FROM alerts0119
-                    WHERE {time_expr} IS NOT NULL
-                      AND {time_expr} >= %s AND {time_expr} <= %s
-                      AND {ticket_col} IS NOT NULL
-                    GROUP BY {ticket_col}
-                    ORDER BY last_alert_time DESC
-                    LIMIT 100
-                    """,
-                    [from_ts, to_ts],
-                )
-                for ticket_number, alert_count, last_alert_time, risk_object, rule_name, alert_ids in cur.fetchall():
-                    table.append({
-                        'ticket_id': ticket_number,
-                        'alert_count': alert_count,
-                        'last_alert_time': last_alert_time.isoformat() if last_alert_time else None,
-                        'top_threat_object': risk_object,
-                        'top_rule': rule_name,
-                        'alert_ids': alert_ids or [],
-                    })
-            else:
-                bucket_rows = []
+        bucket_map = {}
+        for ts, ticket in alerts_qs.values_list('timestamp', 'ticket_number'):
+            if ts is None:
+                continue
+            ts_utc = ts.astimezone(timezone.UTC).replace(tzinfo=None)
+            bucket_time = datetime.utcfromtimestamp(
+                (int(ts_utc.timestamp()) // bucket_seconds) * bucket_seconds
+            )
+            bucket_map.setdefault(bucket_time, set()).add(ticket)
+        bucket_rows = [(k, len(v)) for k, v in bucket_map.items()]
 
         if not table:
             events = CorrelationEvent.objects.filter(occurred_at__range=(from_ts, to_ts)).order_by('occurred_at')

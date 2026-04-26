@@ -134,7 +134,8 @@ def embed_text(text: str, overrides: Optional[Dict[str, Any]] = None) -> List[fl
         "Content-Type": "application/json",
     }
     payload = {"model": cfg["model"], "input": text}
-    res = requests.post(url, headers=headers, json=payload, timeout=cfg["timeout"])
+    timeout = cfg.get("timeout", 30)
+    res = requests.post(url, headers=headers, json=payload, timeout=timeout)
     if res.status_code >= 400:
         raise RuntimeError(f"Embedding API error: {res.status_code} {res.text[:500]}")
     data = res.json()

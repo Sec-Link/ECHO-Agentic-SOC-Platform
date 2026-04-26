@@ -819,21 +819,6 @@ export async function previewEsIntegration(payload:any){
   return r.data
 }
 
-export async function integrationsDbTables(payload:any){
-  const r = await client.post('/integrations/db_tables', payload)
-  return r.data
-}
-
-export async function integrationsCreateTable(payload:any){
-  const r = await client.post('/integrations/create_table', payload)
-  return r.data
-}
-
-export async function integrationsCreateTableFromEs(payload:any){
-  const r = await client.post('/integrations/create_table_from_es', payload)
-  return r.data
-}
-
 export async function integrationsPreviewEsMapping(payload:any){
   const r = await client.post('/integrations/preview_es_mapping', payload)
   return r.data

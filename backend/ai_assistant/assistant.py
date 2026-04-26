@@ -329,7 +329,7 @@ def _decide_mcp_target_by_ai(
         return None
 
     route_prompt = (
-        "You are an MCP router. Select ONE best MCP target for the user request.\n"
+        "You are an MCP router. Choose ONE best MCP target for the user request.\n"
         "Return STRICT JSON only with keys: target_mcp (string), confidence (0..1), reason (string).\n"
         f"User request: {user_prompt}\n"
         f"Available MCP targets: {_json_dumps_safe(options)}\n"

@@ -2,7 +2,7 @@
 import dayjs from 'dayjs'
 import { Card, Button, List, Modal, Form, Input, Select, message, InputNumber, DatePicker, Table } from 'antd'
 import client from 'services/client'
-import { previewEsIntegration, integrationsDbTables, integrationsCreateTable, integrationsCreateTableFromEs, integrationsPreviewEsMapping } from 'services/integrations'
+import { previewEsIntegration } from 'services/integrations'
 
 // Orchestrator page for scheduled tasks (Task) management.
 // - Create/edit/list tasks (schedule, source/dest integration, index, limit, query)
@@ -21,18 +21,11 @@ export default function Orchestrator(){
   const [editingTask, setEditingTask] = useState<any | null>(null)
   const [form] = Form.useForm()
   const [runsModalTask, setRunsModalTask] = useState<any | null>(null)
-  const [availableTables, setAvailableTables] = useState<string[]>([])
-  const [showCreateTableModal, setShowCreateTableModal] = useState(false)
-  const [creatingTableName, setCreatingTableName] = useState('es_imports')
-  const [previewColumns, setPreviewColumns] = useState<any[] | null>(null)
-  const [showPreviewModal, setShowPreviewModal] = useState(false)
-  const [editedColumns, setEditedColumns] = useState<any[] | null>(null)
   const [showPreviewDataModal, setShowPreviewDataModal] = useState(false)
   const [previewData, setPreviewData] = useState<any[] | null>(null)
   const [chartTaskId, setChartTaskId] = useState<string | number | null>(null)
-  const PG_TYPE_OPTIONS = ['text','integer','bigint','smallint','real','double precision','numeric','boolean','timestamptz','timestamp','date','jsonb','json']
-  const MYSQL_TYPE_OPTIONS = ['TEXT','INT','BIGINT','SMALLINT','DOUBLE','TINYINT(1)','DATETIME','JSON','VARCHAR(255)']
   const DJANGO_DEFAULT_DEST = '__django_default__'
+  const DEST_TABLE = 'alerts_alert'
 
   // compute ISO timestamps for lower and upper bounds based on absolute or relative selectors
   // Input may include: timestamp_from, timestamp_to, timestamp_relative, timestamp_relative_custom_value/unit
@@ -178,7 +171,7 @@ export default function Orchestrator(){
     if(v.dest_integration === DJANGO_DEFAULT_DEST){
       payload.config.django_db = 'default'
     }
-    if(v.table) payload.config.table = v.table
+    payload.config.table = DEST_TABLE
     payload.config.index = v.index
     payload.config.limit = Number(v.limit) || 1000
     // if user supplied a JSON query in config textarea, try parse it
@@ -229,70 +222,6 @@ export default function Orchestrator(){
       setEditingTask(null)
       fetch()
       fetchRuns()
-    }catch(e:any){ message.error(String(e)) }
-  }
-
-  const fetchTablesFromIntegration = async () => {
-    try{
-      const v = form.getFieldsValue()
-      if(!v.dest_integration) return
-      const payload: any = v.dest_integration === DJANGO_DEFAULT_DEST
-        ? { django_db: 'default' }
-        : { integration: v.dest_integration }
-      const res = await integrationsDbTables(payload)
-      if(res && res.tables) setAvailableTables(res.tables)
-      else setAvailableTables([])
-    }catch(e:any){ message.warning('Could not fetch tables: ' + (e.message || String(e))) }
-  }
-
-  const handleCreateTable = async () => {
-    try{
-      const v = form.getFieldsValue()
-      const payload: any = { table: creatingTableName }
-      if(v.dest_integration === DJANGO_DEFAULT_DEST){
-        payload.django_db = 'default'
-      }else if(v.dest_integration){
-        payload.integration = v.dest_integration
-      }
-      const res = await integrationsCreateTable(payload)
-      if(res && res.ok){
-        message.success('Table created: ' + res.table)
-        try{ await fetchTablesFromIntegration() }catch(_){ }
-        form.setFieldsValue({ table: res.table })
-        setShowCreateTableModal(false)
-      }else{
-        message.error('Create table failed: ' + JSON.stringify(res))
-      }
-    }catch(e:any){ message.error(String(e)) }
-  }
-
-  const createTableFromEs = async (esIntegrationId?: string, indexName?: string) => {
-    try{
-      const v = form.getFieldsValue()
-      // default to New Task form values if args not provided
-      if(!esIntegrationId) esIntegrationId = v.source_integration
-      if(!indexName) indexName = v.index
-      const payload: any = { table: creatingTableName }
-      if(esIntegrationId) payload.alerts = esIntegrationId
-      if(indexName) payload.index = indexName
-      if(v.dest_integration === DJANGO_DEFAULT_DEST){
-        payload.django_db = 'default'
-      }else if(v.dest_integration){
-        payload.dest_integration = v.dest_integration
-      }
-      payload.save_to_file = true
-      if(editedColumns && editedColumns.length > 0){ payload.columns = editedColumns.map((c:any)=>({ orig_name: c.orig_name, colname: c.colname, sql_type: c.sql_type })) }
-      const res = await integrationsCreateTableFromEs(payload)
-      if(res && res.ok){
-        if(res.saved_path) message.success('Mapping saved to: ' + res.saved_path)
-        message.success('Table created from ES mapping: ' + res.table)
-        try{ await fetchTablesFromIntegration() }catch(_){ }
-        form.setFieldsValue({ table: res.table })
-        if(res.columns && res.columns.length){ setEditedColumns(res.columns) }
-        setShowCreateTableModal(false)
-      }else{
-        message.error('Create table failed: ' + JSON.stringify(res))
-      }
     }catch(e:any){ message.error(String(e)) }
   }
 
@@ -366,7 +295,6 @@ export default function Orchestrator(){
               initial.dest_integration = cfg.dest_integration
               initial.index = cfg.index
               initial.limit = cfg.limit || 1000
-              if (cfg.table) initial.table = cfg.table
               if(cfg.query) initial.config = typeof cfg.query === 'string' ? cfg.query : JSON.stringify(cfg.query, null, 2)
               if(cfg.timestamp_field) initial.timestamp_field = cfg.timestamp_field
               if(cfg.timestamp_from) initial.timestamp_from = dayjs(cfg.timestamp_from)
@@ -444,120 +372,6 @@ export default function Orchestrator(){
             <Button onClick={()=>Modal.info({ title: `Run ${r.id} logs`, width: 800, content: (<pre style={{ whiteSpace: 'pre-wrap' }}>{r.logs}</pre>) })}>View Logs</Button>
           </List.Item>
         )} />
-      </Modal>
-
-      <Modal open={showCreateTableModal} title="Create table" onCancel={()=>setShowCreateTableModal(false)} footer={(
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button onClick={()=>setShowCreateTableModal(false)}>Cancel</Button>
-              <Button onClick={async ()=>{
-                try{
-                  // use New Task form values for integration/index/time range
-                  const v = form.getFieldsValue()
-                  const alerts = v.source_integration
-                  const index_name = v.index
-                  if(!alerts || !index_name){ message.warning('Select ES integration and index to preview'); return }
-                  const payload:any = { alerts: alerts, index: index_name }
-                  if(v.dest_integration) payload.dest_integration = v.dest_integration
-                  // build optional time range query from form
-                  const range = computeTsRange(v)
-                  if(v.timestamp_field && range.from){
-                    // send a range query and request the latest single doc by sorting descending
-                    payload.query = { "query": { "range": { [v.timestamp_field]: { "gte": range.from, "lte": range.to || 'now' } } } }
-                    payload.sort = [ { [v.timestamp_field]: { order: 'desc' } } ]
-                    payload.size = 1
-                  } else {
-                    // default: fetch latest single doc
-                    if(v.timestamp_field){
-                      payload.sort = [ { [v.timestamp_field]: { order: 'desc' } } ]
-                    }
-                    payload.size = 1
-                  }
-                  // request preview and ask backend to save file
-                  const suggestedName = `preview_${alerts || 'es'}_${(index_name || 'index')}.json`
-                  payload.save_to_file = true
-                  payload.filename = suggestedName
-                  const res = await integrationsPreviewEsMapping(payload)
-                  if(res && res.ok){
-                    setPreviewColumns(res.columns || [])
-                    setEditedColumns((res.columns || []).map((c:any)=> ({ ...c })))
-                    setShowPreviewModal(true)
-                    if(res.saved_path){ message.success('Preview saved to: ' + res.saved_path) }
-                  }else{
-                    message.error('Preview failed: ' + JSON.stringify(res))
-                  }
-                }catch(e:any){ message.error(String(e)) }
-              }}>Preview Schema</Button>
-              <Button onClick={async ()=>{ await createTableFromEs() }}>Create from ES mapping</Button>
-          <Button type="primary" onClick={handleCreateTable}>Create</Button>
-        </div>
-      )}>
-        <Form layout="vertical">
-          <Form.Item label="Table name">
-            <Input value={creatingTableName} onChange={e=>setCreatingTableName(e.target.value)} />
-          </Form.Item>
-          <Form.Item>
-            <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>Create from the ES index selected in the New Task form (Source Integration + Index + Time range).</div>
-          </Form.Item>
-          <div style={{ fontSize: 12, color: '#666' }}>Creates a default table with columns: id, es_id, data, created_at (or more from mapping)</div>
-        </Form>
-      </Modal>
-
-      <Modal open={showPreviewModal} title="Preview schema from ES mapping" onCancel={()=>{ setShowPreviewModal(false); setPreviewColumns(null) }} footer={null} width={700}>
-        {editedColumns && editedColumns.length > 0 ? (
-          <div style={{ maxHeight: 400, overflow: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left', borderBottom: '1px solid #eee', padding: 6 }}>Orig Name</th>
-                  <th style={{ textAlign: 'left', borderBottom: '1px solid #eee', padding: 6 }}>Column</th>
-                  <th style={{ textAlign: 'left', borderBottom: '1px solid #eee', padding: 6 }}>ES Type</th>
-                  <th style={{ textAlign: 'left', borderBottom: '1px solid #eee', padding: 6 }}>SQL Type</th>
-                  <th style={{ textAlign: 'left', borderBottom: '1px solid #eee', padding: 6 }}>Sample</th>
-                </tr>
-              </thead>
-              <tbody>
-                {editedColumns.map((c:any,i:number)=> (
-                  <tr key={i}>
-                    <td style={{ padding: 6, borderBottom: '1px solid #f6f6f6' }}>{c.orig_name}</td>
-                    <td style={{ padding: 6, borderBottom: '1px solid #f6f6f6' }}>
-                      <Input value={c.colname} onChange={(e)=>{
-                        const copy = editedColumns.slice(); copy[i] = { ...copy[i], colname: e.target.value }; setEditedColumns(copy)
-                      }} />
-                    </td>
-                    <td style={{ padding: 6, borderBottom: '1px solid #f6f6f6' }}>{String(c.es_type || '')}</td>
-                    <td style={{ padding: 6, borderBottom: '1px solid #f6f6f6' }}>
-                      {(() => {
-                        // look up selected destination integration type and choose SQL type options accordingly
-                        const targetIntegrationId = form.getFieldValue('dest_integration')
-                        const targetIntegration = integrations.find((x:any)=> x.id === targetIntegrationId)
-                        const targetType = (targetIntegration && (targetIntegration.type || '').toString().toLowerCase()) || ''
-                        const options = (targetType === 'mysql' || targetType === 'mariadb') ? MYSQL_TYPE_OPTIONS : PG_TYPE_OPTIONS
-                        const value = c.sql_type || (options.length ? options[0] : '')
-                        return (
-                          <Select value={value} style={{ minWidth: 180 }} onChange={(val:any)=>{ const copy = editedColumns.slice(); copy[i] = { ...copy[i], sql_type: val }; setEditedColumns(copy) }}>
-                            {options.map(op => (<Select.Option key={op} value={op}>{op}</Select.Option>))}
-                          </Select>
-                        )
-                      })()}
-                    </td>
-                    <td style={{ padding: 6, borderBottom: '1px solid #f6f6f6' }}>{String(c.sample ?? '')}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div>No columns inferred from mapping.</div>
-        )}
-        <div style={{ marginTop: 12 }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button onClick={()=>{ setShowPreviewModal(false) }}>Close</Button>
-            <Button type="primary" onClick={()=>{
-              setPreviewColumns(editedColumns)
-              setShowPreviewModal(false)
-            }}>Save Edits</Button>
-          </div>
-        </div>
       </Modal>
 
       <Modal
@@ -697,16 +511,8 @@ export default function Orchestrator(){
               }
             </Select>
           </Form.Item>
-          <Form.Item label="Destination table (optional)">
-            <Input.Group compact>
-              <Form.Item name="table" noStyle>
-                <Select style={{ minWidth: 240 }} placeholder="Select existing table or leave empty">
-                  {availableTables.map(tb => (<Select.Option key={tb} value={tb}>{tb}</Select.Option>))}
-                </Select>
-              </Form.Item>
-              <Button onClick={()=>setShowCreateTableModal(true)}>Create table</Button>
-              <Button onClick={()=>fetchTablesFromIntegration()} type="default">Refresh</Button>
-            </Input.Group>
+          <Form.Item label="Destination table">
+            <Input value={DEST_TABLE} disabled />
           </Form.Item>
           <Form.Item name="limit" label="Limit"><InputNumber style={{ width: '100%' }} min={1} /></Form.Item>
         </Form>
