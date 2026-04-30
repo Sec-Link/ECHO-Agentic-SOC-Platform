@@ -148,7 +148,7 @@ class AuditLog(models.Model):
 
 
 class SystemSettings(models.Model):
-    auto_approve_enabled = models.BooleanField(default=False)
+    auto_approve_enabled = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -158,7 +158,7 @@ class SystemSettings(models.Model):
     def get_solo(cls) -> "SystemSettings":
         obj = cls.objects.order_by("id").first()
         if obj is None:
-            obj = cls.objects.create(auto_approve_enabled=False)
+            obj = cls.objects.create(auto_approve_enabled=True)
         return obj
 
     @classmethod

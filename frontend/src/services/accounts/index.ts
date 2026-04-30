@@ -2,6 +2,7 @@ export {
   login,
   register,
   registerEmail,
+  getGuestEmailStatus,
   requestOtp,
   verifyOtp,
   clearAccessToken,

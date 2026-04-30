@@ -29,7 +29,7 @@ const RegistrationApprovals: React.FC = () => {
   const [reasonModalOpen, setReasonModalOpen] = useState(false);
   const [reasonDraft, setReasonDraft] = useState('');
   const [rejectTargetId, setRejectTargetId] = useState<string | null>(null);
-  const [autoApproveEnabled, setAutoApproveEnabled] = useState(false);
+  const [autoApproveEnabled, setAutoApproveEnabled] = useState(true);
   const [savingAutoApprove, setSavingAutoApprove] = useState(false);
 
   const reload = async () => {

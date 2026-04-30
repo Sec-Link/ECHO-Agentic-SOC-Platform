@@ -667,6 +667,19 @@ html, body {
   padding-bottom: 28px;
 }
 
+.login-brand-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.login-brand-logo {
+  width: 104px;
+  height: auto;
+  opacity: 0.94;
+  filter: drop-shadow(0 6px 16px rgba(46, 118, 232, 0.28));
+}
+
 .login-cyber-card .ant-input,
 .login-cyber-card .ant-input-password,
 .login-cyber-card .ant-input-affix-wrapper {
@@ -727,6 +740,70 @@ html, body {
   background: #ffffff !important;
   border-color: #c2d6f0 !important;
   color: #0b2344 !important;
+}
+
+.login-mail-modal .ant-modal-content {
+  border-radius: 14px !important;
+  border: 1px solid rgba(120, 167, 255, 0.34) !important;
+  background: linear-gradient(180deg, rgba(8, 20, 42, 0.96), rgba(6, 13, 29, 0.98)) !important;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(120, 167, 255, 0.12) inset !important;
+  overflow: hidden;
+}
+
+.login-mail-modal .ant-modal-close {
+  top: 12px !important;
+  inset-inline-end: 12px !important;
+  width: 34px !important;
+  height: 34px !important;
+  border-radius: 10px !important;
+  border: 1px solid rgba(120, 167, 255, 0.26) !important;
+  background: rgba(12, 26, 50, 0.72) !important;
+  transition: transform 180ms ease, background-color 180ms ease, border-color 180ms ease !important;
+}
+
+.login-mail-modal .ant-modal-close:hover {
+  transform: translateY(-1px) scale(1.04);
+  background: rgba(30, 54, 94, 0.9) !important;
+  border-color: rgba(144, 186, 255, 0.45) !important;
+}
+
+.login-mail-modal .ant-modal-close .ant-modal-close-x {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  color: #d8e8ff !important;
+}
+
+.login-mail-modal-close-x {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.login-mail-modal-content {
+  animation: loginMailModalPop 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.login-mail-modal .ant-modal-mask {
+  backdrop-filter: blur(6px);
+  background: rgba(3, 10, 24, 0.56) !important;
+}
+
+@keyframes loginMailModalPop {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+    filter: blur(2px);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(-3px) scale(1.015);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
 }
 
 @keyframes htbGridDrift {

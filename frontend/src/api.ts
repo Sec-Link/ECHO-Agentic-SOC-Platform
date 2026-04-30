@@ -150,6 +150,15 @@ export async function registerEmail(email: string) {
   return res.data;
 }
 
+export async function getGuestEmailStatus(email: string) {
+  const res = await client.post('/auth/guest-email-status/', { email });
+  return res.data as {
+    email: string;
+    is_registered_readonly: boolean;
+    next_action: 'register' | 'send_otp';
+  };
+}
+
 export async function requestOtp(email: string) {
   const res = await client.post('/auth/otp/request/', { email });
   return res.data;

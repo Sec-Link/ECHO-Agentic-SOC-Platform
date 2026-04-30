@@ -17,6 +17,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 from accounts.views import LoginAPIView, LogoutAPIView, RegisterAPIView, RegisterEmailAPIView, OTPRequestAPIView, OTPVerifyAPIView
+from accounts.views import GuestEmailStatusAPIView
 from dashboards.views import DashboardViewSet
 from integrations.views import test_es_connection
 from integrations.views import IntegrationViewSet, preview_es_index
@@ -60,6 +61,8 @@ urlpatterns = [
     path('api/v1/auth/register', RegisterAPIView.as_view()),
     path('api/v1/auth/register-email/', RegisterEmailAPIView.as_view(), name='register-email'),
     path('api/v1/auth/register-email', RegisterEmailAPIView.as_view()),
+    path('api/v1/auth/guest-email-status/', GuestEmailStatusAPIView.as_view(), name='guest-email-status'),
+    path('api/v1/auth/guest-email-status', GuestEmailStatusAPIView.as_view()),
     path('api/v1/auth/otp/request/', OTPRequestAPIView.as_view(), name='otp-request'),
     path('api/v1/auth/otp/request', OTPRequestAPIView.as_view()),
     path('api/v1/auth/otp/verify/', OTPVerifyAPIView.as_view(), name='otp-verify'),

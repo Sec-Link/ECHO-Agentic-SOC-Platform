@@ -16,7 +16,7 @@ const LoginSwitcher: React.FC<Props> = ({ mode, onChange }) => {
         value={mode}
         options={[
           { label: 'Internal Login', value: 'internal' },
-          { label: 'External OTP', value: 'externalOtp' },
+          { label: 'Guest Login', value: 'externalOtp' },
         ]}
         onChange={(value) => onChange(value as LoginMode)}
       />

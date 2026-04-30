@@ -2,6 +2,7 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
 from accounts.views import (
+    GuestEmailStatusAPIView,
     LoginAPIView,
     LogoutAPIView,
     OTPRequestAPIView,
@@ -27,6 +28,7 @@ urlpatterns = [
     # auth endpoints
     path('auth/register/', RegisterAPIView.as_view(), name='register'),
     path('auth/register-email/', RegisterEmailAPIView.as_view(), name='register_email'),
+    path('auth/guest-email-status/', GuestEmailStatusAPIView.as_view(), name='guest_email_status'),
     path('auth/login/', LoginAPIView.as_view(), name='login'),
     path('auth/otp/request/', OTPRequestAPIView.as_view(), name='otp_request'),
     path('auth/otp/verify/', OTPVerifyAPIView.as_view(), name='otp_verify'),

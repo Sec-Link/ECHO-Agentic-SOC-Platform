@@ -318,6 +318,42 @@ class OTPRequestAPIView(APIView):
         )
 
 
+class GuestEmailStatusAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    @staticmethod
+    def _safe_profile(user: User):
+        return UserAuthProfile.objects.filter(user=user).first()
+
+    def post(self, request):
+        serializer = OTPRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user is None:
+            return Response(
+                {
+                    "email": email,
+                    "is_registered_readonly": False,
+                    "next_action": "register",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        profile = self._safe_profile(user)
+        is_registered_readonly = bool(
+            profile and profile.auth_method == UserAuthProfile.AuthMethod.OTP_ONLY and profile.is_readonly
+        )
+        return Response(
+            {
+                "email": email,
+                "is_registered_readonly": is_registered_readonly,
+                "next_action": "send_otp" if is_registered_readonly else "register",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class OTPVerifyAPIView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = "otp_verify"

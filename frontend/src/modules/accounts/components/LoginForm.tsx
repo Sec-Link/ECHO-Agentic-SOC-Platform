@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, Space, Typography } from 'antd';
 import LoginSwitcher, { LoginMode } from './LoginSwitcher';
 import InternalLoginForm from './InternalLoginForm';
@@ -25,10 +25,6 @@ const LoginForm: React.FC<Props> = ({ onLogin }) => {
     } catch {}
   }, [mode]);
 
-  const panelTitle = useMemo(() => {
-    return mode === 'internal' ? 'Internal Account Login' : 'External OTP Login';
-  }, [mode]);
-
   return (
     <div className="login-cyber-wrap">
       <div className="login-cyber-bg-grid" />
@@ -36,10 +32,12 @@ const LoginForm: React.FC<Props> = ({ onLogin }) => {
       <div className="login-cyber-glow login-cyber-glow-b" />
       <Card className="login-cyber-card" role="region" aria-label="Authentication panel">
         <Space direction="vertical" style={{ width: '100%' }} size={16}>
+          <div className="login-brand-wrap">
+            <img src="/seclink-logo.jpg" alt="SecLink logo" className="login-brand-logo" />
+          </div>
           <Typography.Title level={3} style={{ textAlign: 'center', margin: 0, color: '#d8e8ff' }}>
-            Welcome
+            Log in to ECHO
           </Typography.Title>
-          <Typography.Text style={{ textAlign: 'center', color: '#9ab8e6' }}>{panelTitle}</Typography.Text>
           <LoginSwitcher mode={mode} onChange={setMode} />
 
           <div className="login-mode-panel-wrap" key={mode}>
