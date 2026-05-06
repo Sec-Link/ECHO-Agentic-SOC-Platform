@@ -8,15 +8,7 @@ The project uses a separated frontend/backend architecture: the frontend is buil
 
 ## 1. Product Positioning
 
-ECHO-SOC-Platform addresses common SOC fragmentation problems:
-
-- Alerts originate from multiple systems and lack a unified entrypoint
-- Tickets, assets, alerts, and playbooks are fragmented
-- Manual investigation paths are long and hard to reuse
-- Analysts must switch between many tools
-- Integrating LLMs safely and controllably into SOC workflows is non-trivial
-
-The platform consolidates core SOC objects into one product:
+The platform consolidates core SOC objects into one product with open-source solutions:
 
 - Alerts: alert ingestion, caching, search, and display
 - Tickets: incident/ticket management and collaboration
@@ -343,7 +335,7 @@ In production we recommend:
 
 ## 14. Use Cases
 
-Use cases include enterprise SOC platforms, MSSP operator consoles, automation & orchestration projects, and prototypes that embed AI into investigation workflows.
+Use cases include enterprise SOC platforms, automation & orchestration projects, and prototypes that embed AI into investigation workflows.
 
 ---
 
