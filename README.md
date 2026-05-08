@@ -120,6 +120,9 @@ flowchart LR
 - Django REST Framework
 - DRF Token Authentication
 
+### Data / Infrastructure
+PostgreSQL 16 (optional)
+Elasticsearch (optional)
 ---
 
 ## 5. Main Modules
