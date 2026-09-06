@@ -17,7 +17,6 @@ gunicorn>=20.1.0
 whitenoise==6.0.0
 pandas
 openpyxl
-prefect
 pysigma>=1.3.3,<2.0.0
 pySigma-backend-elasticsearch>=2.0.3,<3.0.0
 cryptography>=44.0.0

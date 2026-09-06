@@ -8,14 +8,24 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 
+from .prefect.actions import ActionRegistry
+from .prefect.secrets import (
+    ENCRYPTED_PREFIX,
+    RuntimeSecretError,
+    decrypt_payload,
+    encrypt_payload,
+)
 
-ENCRYPTED_PREFIX = "enc:v1:"
+
+HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
 
 
 class SecretConfigError(ValidationError):
@@ -31,9 +41,6 @@ class SensitiveField:
 
 
 def _action_schema(action_type: str) -> Dict[str, Any]:
-    # Lazy import avoids loading the action registry while Django models import.
-    from .actions import ActionRegistry
-
     action_class = ActionRegistry.get_all_actions().get(action_type)
     return copy.deepcopy(getattr(action_class, "config_schema", {}) or {})
 
@@ -56,23 +63,6 @@ def sensitive_fields(action_type: str) -> Dict[str, SensitiveField]:
 
 def is_encrypted(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX)
-
-
-def _fernet_ring():
-    keys = list(getattr(settings, "WORKFLOW_ENCRYPTION_KEYS", None) or [])
-    if not keys:
-        raise ImproperlyConfigured(
-            "WORKFLOW_ENCRYPTION_KEYS is required for sensitive workflow configuration."
-        )
-    try:
-        from cryptography.fernet import Fernet, MultiFernet
-
-        fernets = [Fernet(str(key).encode("ascii")) for key in keys]
-        return fernets[0], MultiFernet(fernets)
-    except (ImportError, TypeError, ValueError) as exc:
-        raise ImproperlyConfigured(
-            "WORKFLOW_ENCRYPTION_KEYS contains an invalid Fernet key or cryptography is unavailable."
-        ) from exc
 
 
 def _normalised_binding_value(field: str, value: Any, schema: Dict[str, Any]) -> Any:
@@ -105,6 +95,117 @@ def _binding_digest(action_type: str, field: str, binding: Dict[str, Any]) -> st
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _item_identity(section: str, key: str) -> str:
+    return key.casefold() if section == "headers" else key
+
+
+def _item_binding_digest(section: str, key: str, url: Any) -> str:
+    canonical = json.dumps(
+        {
+            "action_type": "api_call",
+            "field": section,
+            "item_key": key,
+            "binding": {"url": _normalised_binding_value("url", url, _action_schema("api_call"))},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _encrypt_item_value(section: str, key: str, value: Any, url: Any) -> str:
+    payload = {
+        "version": 1,
+        "action_type": "api_call",
+        "field": section,
+        "item_key": _item_identity(section, key),
+        "binding_digest": _item_binding_digest(section, key, url),
+        "value": value,
+    }
+    try:
+        return encrypt_payload(payload, getattr(settings, "WORKFLOW_ENCRYPTION_KEYS", None) or [])
+    except RuntimeSecretError as exc:
+        raise ImproperlyConfigured(str(exc)) from exc
+
+
+def _decrypt_item_value(section: str, key: str, value: Any, url: Any) -> Any:
+    if not is_encrypted(value):
+        raise SecretConfigError(f"Sensitive {section} value is not encrypted.")
+    try:
+        payload = decrypt_payload(value, getattr(settings, "WORKFLOW_ENCRYPTION_KEYS", None) or [])
+    except RuntimeSecretError as exc:
+        raise SecretConfigError(f"Sensitive {section} value could not be decrypted.") from exc
+    if (
+        payload.get("version") != 1
+        or payload.get("action_type") != "api_call"
+        or payload.get("field") != section
+        or payload.get("item_key") != _item_identity(section, key)
+        or payload.get("binding_digest") != _item_binding_digest(section, key, url)
+    ):
+        raise SecretConfigError(
+            f"Sensitive {section} value is not valid for the current URL and key; submit it again."
+        )
+    return payload.get("value")
+
+
+def _prepare_api_entries(
+    section: str,
+    incoming: Dict[str, Any],
+    existing: Dict[str, Any],
+    merged: Dict[str, Any],
+) -> None:
+    source = incoming.get(section) if section in incoming else existing.get(section, [])
+    if source is None:
+        source = []
+    if not isinstance(source, list):
+        raise SecretConfigError(f"{section} must be a list.")
+    old_items = {
+        _item_identity(section, str(item.get("key") or "").strip()): item
+        for item in (existing.get(section) or [])
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+    result = []
+    seen: set[str] = set()
+    for source_item in source:
+        if not isinstance(source_item, dict):
+            raise SecretConfigError(f"Each {section} entry must be an object.")
+        item = copy.deepcopy(source_item)
+        key = str(item.get("key") or "").strip()
+        identity = _item_identity(section, key)
+        if not key or identity in seen:
+            raise SecretConfigError(f"{section} contains an empty or duplicate key.")
+        if section == "headers" and not HEADER_NAME.fullmatch(key):
+            raise SecretConfigError(f"Invalid header key: {key}.")
+        if not isinstance(item.get("sensitive", False), bool):
+            raise SecretConfigError(f"Sensitive flag for {section} key {key} must be boolean.")
+        seen.add(identity)
+        sensitive = bool(item.get("sensitive", False))
+        old = old_items.get(identity) or {}
+        supplied = "value" in item and item.get("value") not in (None, "")
+        value = item.get("value")
+        if value is not None and not isinstance(value, str):
+            raise SecretConfigError(f"Value for {section} key {key} must be a string.")
+
+        if sensitive:
+            if not supplied:
+                value = old.get("value")
+                if not old.get("sensitive") or value in (None, ""):
+                    raise SecretConfigError(f"Sensitive {section} value for {key} is required.")
+            if is_encrypted(value):
+                _decrypt_item_value(section, key, value, merged.get("url"))
+            else:
+                value = _encrypt_item_value(section, key, value, merged.get("url"))
+        else:
+            if "value" not in item:
+                raise SecretConfigError(f"Value for {section} key {key} is required.")
+            if is_encrypted(value):
+                raise SecretConfigError(f"Encrypted {section} values must remain marked sensitive.")
+
+        result.append({"key": key, "value": value, "sensitive": sensitive})
+    merged[section] = result
+
+
 def encrypt_sensitive_value(
     action_type: str,
     field: str,
@@ -114,7 +215,6 @@ def encrypt_sensitive_value(
     spec = sensitive_fields(action_type).get(field)
     if spec is None:
         raise SecretConfigError(f"{field} is not declared as a sensitive field for {action_type}.")
-    primary, _ = _fernet_ring()
     binding = _binding_snapshot(action_type, config, spec)
     payload = {
         "version": 1,
@@ -123,10 +223,10 @@ def encrypt_sensitive_value(
         "binding_digest": _binding_digest(action_type, field, binding),
         "value": value,
     }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    return ENCRYPTED_PREFIX + primary.encrypt(encoded).decode("ascii")
+    try:
+        return encrypt_payload(payload, getattr(settings, "WORKFLOW_ENCRYPTION_KEYS", None) or [])
+    except RuntimeSecretError as exc:
+        raise ImproperlyConfigured(str(exc)) from exc
 
 
 def decrypt_sensitive_value(
@@ -140,13 +240,9 @@ def decrypt_sensitive_value(
     spec = sensitive_fields(action_type).get(field)
     if spec is None:
         raise SecretConfigError(f"{field} is not declared as a sensitive field for {action_type}.")
-    _, ring = _fernet_ring()
     try:
-        from cryptography.fernet import InvalidToken
-
-        decoded = ring.decrypt(value[len(ENCRYPTED_PREFIX):].encode("ascii"))
-        payload = json.loads(decoded.decode("utf-8"))
-    except (InvalidToken, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        payload = decrypt_payload(value, getattr(settings, "WORKFLOW_ENCRYPTION_KEYS", None) or [])
+    except RuntimeSecretError as exc:
         raise SecretConfigError(f"Sensitive field {field} could not be decrypted.") from exc
 
     binding = _binding_snapshot(action_type, config, spec)
@@ -244,6 +340,22 @@ def prepare_config_for_storage(
         if require_sensitive and spec.required and field not in merged:
             raise SecretConfigError(f"Sensitive field {field} is required.")
 
+    if action_type == "api_call":
+        for section in ("headers", "query_params"):
+            _prepare_api_entries(section, incoming, existing, merged)
+        auth_type = str(merged.get("auth_type") or "none").lower()
+        if auth_type != "none" and any(
+            item["key"].casefold() == "authorization" for item in merged["headers"]
+        ):
+            raise SecretConfigError(
+                "Built-in authentication cannot be combined with an Authorization header."
+            )
+        if require_sensitive:
+            if auth_type in {"bearer", "basic"} and "auth_secret" not in merged:
+                raise SecretConfigError("Sensitive field auth_secret is required for the selected authentication type.")
+            if auth_type == "basic" and not str(merged.get("auth_username") or "").strip():
+                raise SecretConfigError("auth_username is required for Basic authentication.")
+
     if require_sensitive and action_type in {"block_ip", "release_ip"}:
         if str(merged.get("provider") or "generic").lower() == "opnsense":
             for field in ("api_key", "api_secret"):
@@ -257,6 +369,11 @@ def decrypt_config_for_execution(action_type: str, config: Dict[str, Any] | None
     for field in sensitive_fields(action_type):
         if field in result:
             result[field] = decrypt_sensitive_value(action_type, field, result[field], result)
+    if action_type == "api_call":
+        for section in ("headers", "query_params"):
+            for item in result.get(section) or []:
+                if item.get("sensitive"):
+                    item["value"] = _decrypt_item_value(section, item["key"], item.get("value"), result.get("url"))
     return result
 
 
@@ -266,6 +383,16 @@ def rotate_config(action_type: str, config: Dict[str, Any] | None) -> Dict[str, 
     for field in sensitive_fields(action_type):
         if field in plaintext:
             result[field] = encrypt_sensitive_value(action_type, field, plaintext[field], result)
+    if action_type == "api_call":
+        for section in ("headers", "query_params"):
+            for item in result.get(section) or []:
+                if item.get("sensitive"):
+                    plain = next(
+                        candidate["value"]
+                        for candidate in plaintext.get(section) or []
+                        if _item_identity(section, candidate["key"]) == _item_identity(section, item["key"])
+                    )
+                    item["value"] = _encrypt_item_value(section, item["key"], plain, result.get("url"))
     return result
 
 
@@ -276,6 +403,18 @@ def redact_config(action_type: str, config: Dict[str, Any] | None) -> tuple[Dict
         if field in result and result[field] not in (None, ""):
             configured.append(field)
         result.pop(field, None)
+    if action_type == "api_call":
+        for section in ("headers", "query_params"):
+            redacted = []
+            for item in result.get(section) or []:
+                safe = {"key": item.get("key", ""), "sensitive": bool(item.get("sensitive"))}
+                if safe["sensitive"] and item.get("value") not in (None, ""):
+                    safe["configured"] = True
+                    configured.append(f"{section}.{safe['key']}")
+                elif not safe["sensitive"]:
+                    safe["value"] = item.get("value", "")
+                redacted.append(safe)
+            result[section] = redacted
     return result, sorted(configured)
 
 

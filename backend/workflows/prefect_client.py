@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional
 import requests
 
 logger = logging.getLogger(__name__)
+PREFECT_API_VERSION = '0.8.4'
 
 
 # Prefect state names → WorkflowExecution status values.
@@ -78,7 +79,10 @@ def resolve_deployment_id(override: Optional[str] = None) -> str:
 
 
 def _headers() -> Dict[str, str]:
-    headers = {'Content-Type': 'application/json'}
+    headers = {
+        'Content-Type': 'application/json',
+        'X-PREFECT-API-VERSION': PREFECT_API_VERSION,
+    }
     api_key = os.getenv('PREFECT_API_KEY', '').strip()
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
@@ -90,6 +94,30 @@ def _timeout() -> float:
         return float(os.getenv('PREFECT_TIMEOUT_SECONDS', '10'))
     except (TypeError, ValueError):
         return 10.0
+
+
+def _request(
+    method: str,
+    path: str,
+    *,
+    operation: str,
+    allowed_statuses: tuple[int, ...] = (),
+    **kwargs: Any,
+):
+    try:
+        response = getattr(requests, method)(
+            f'{_api_base()}{path}',
+            headers=_headers(),
+            timeout=_timeout(),
+            **kwargs,
+        )
+    except requests.RequestException as exc:
+        raise PrefectAPIError(f'Prefect {operation} request failed: {exc}') from exc
+    if response.status_code >= 400 and response.status_code not in allowed_statuses:
+        raise PrefectAPIError(
+            f'Prefect {operation} returned {response.status_code}: {response.text[:500]}'
+        )
+    return response
 
 
 def is_configured(deployment_id: Optional[str] = None) -> bool:
@@ -114,6 +142,7 @@ def create_flow_run(
     name: Optional[str] = None,
     tags: Optional[list] = None,
     deployment_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a flow run on the configured generic deployment.
@@ -121,31 +150,27 @@ def create_flow_run(
     Returns the parsed JSON body, which contains at minimum ``id`` (the flow
     run UUID) and ``state``.
     """
-    url = f"{_api_base()}/deployments/{resolve_deployment_id(deployment_id)}/create_flow_run"
+    path = f"/deployments/{resolve_deployment_id(deployment_id)}/create_flow_run"
     payload: Dict[str, Any] = {'parameters': parameters}
     if name:
         payload['name'] = name
     if tags:
         payload['tags'] = list(tags)
-
-    resp = requests.post(url, json=payload, headers=_headers(), timeout=_timeout())
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect create_flow_run returned {resp.status_code}: {resp.text[:500]}'
-        )
-    return resp.json()
+    if idempotency_key:
+        payload['idempotency_key'] = str(idempotency_key)
+    return _request('post', path, operation='create_flow_run', json=payload).json()
 
 
 def get_flow_run(flow_run_id: str) -> Dict[str, Any]:
     """Fetch the full flow run record (state, timestamps, parameters)."""
-    url = f"{_api_base()}/flow_runs/{flow_run_id}"
-    resp = requests.get(url, headers=_headers(), timeout=_timeout())
+    resp = _request(
+        'get',
+        f"/flow_runs/{flow_run_id}",
+        operation='get_flow_run',
+        allowed_statuses=(404,),
+    )
     if resp.status_code == 404:
         raise PrefectAPIError(f'Flow run {flow_run_id} not found on Prefect.')
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect get_flow_run returned {resp.status_code}: {resp.text[:500]}'
-        )
     return resp.json()
 
 
@@ -154,64 +179,127 @@ def cancel_flow_run(flow_run_id: str) -> None:
     Ask Prefect to cancel an in-flight flow run. Idempotent: cancelling an
     already-terminal run is a no-op from our perspective.
     """
-    url = f"{_api_base()}/flow_runs/{flow_run_id}/set_state"
     payload = {
         'state': {'type': 'CANCELLING', 'name': 'Cancelling'},
         'force': False,
     }
-    resp = requests.post(url, json=payload, headers=_headers(), timeout=_timeout())
-    # Prefect returns 200 or 201 for accepted state transitions; treat 409
-    # (already terminal) as success since the user's intent is satisfied.
-    if resp.status_code in (200, 201, 409):
-        return
-    raise PrefectAPIError(
-        f'Prefect cancel_flow_run returned {resp.status_code}: {resp.text[:500]}'
+    _request(
+        'post',
+        f"/flow_runs/{flow_run_id}/set_state",
+        operation='cancel_flow_run',
+        allowed_statuses=(409,),
+        json=payload,
     )
 
 
-def update_deployment_schedule(
+def list_deployment_schedules(deployment_id: str) -> list[Dict[str, Any]]:
+    resp = _request(
+        'get',
+        f"/deployments/{deployment_id}/schedules",
+        operation='list schedules',
+    )
+    data = resp.json()
+    return data if isinstance(data, list) else []
+
+
+def create_deployment_schedule(
     *,
     deployment_id: str,
-    schedule: Dict[str, Any] | None,
+    slug: str,
+    schedule: Dict[str, Any],
     is_active: bool,
+    parameters: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Update the schedule attached to a Prefect deployment.
+    payload = [{
+        'slug': slug,
+        'schedule': schedule,
+        'active': bool(is_active),
+        'parameters': parameters,
+    }]
+    resp = _request(
+        'post',
+        f"/deployments/{deployment_id}/schedules",
+        operation='create schedule',
+        json=payload,
+    )
+    data = resp.json()
+    return data[0] if isinstance(data, list) and data else {}
 
-    Prefect 3.x represents deployment schedules as a ``schedules`` list. We
-    keep a stable slug so subsequent updates replace the Argus-owned schedule.
-    """
-    url = f"{_api_base()}/deployments/{deployment_id}"
-    payload: Dict[str, Any] = {'schedules': []}
-    if schedule is not None:
-        payload['schedules'] = [{
-            'schedule': schedule,
-            'active': bool(is_active),
-            'slug': 'argus-workflow-schedule',
-        }]
-    resp = requests.patch(url, json=payload, headers=_headers(), timeout=_timeout())
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect update_deployment_schedule returned {resp.status_code}: {resp.text[:500]}'
+
+def patch_deployment_schedule(
+    *,
+    deployment_id: str,
+    schedule_id: str,
+    slug: str,
+    schedule: Dict[str, Any],
+    is_active: bool,
+    parameters: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = {
+        'slug': slug,
+        'schedule': schedule,
+        'active': bool(is_active),
+        'parameters': parameters,
+    }
+    resp = _request(
+        'patch',
+        f"/deployments/{deployment_id}/schedules/{schedule_id}",
+        operation='update schedule',
+        json=payload,
+    )
+    return resp.json() if resp.text.strip() else {}
+
+
+def delete_deployment_schedule(*, deployment_id: str, schedule_id: str) -> None:
+    _request(
+        'delete',
+        f"/deployments/{deployment_id}/schedules/{schedule_id}",
+        operation='delete schedule',
+        allowed_statuses=(404,),
+    )
+
+
+def upsert_deployment_schedule(
+    *,
+    deployment_id: str,
+    slug: str,
+    schedule: Dict[str, Any],
+    is_active: bool,
+    parameters: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing = next((item for item in list_deployment_schedules(deployment_id) if item.get('slug') == slug), None)
+    if existing and existing.get('id'):
+        return patch_deployment_schedule(
+            deployment_id=deployment_id,
+            schedule_id=str(existing['id']),
+            slug=slug,
+            schedule=schedule,
+            is_active=is_active,
+            parameters=parameters,
         )
-    if not resp.text.strip():
-        return {}
-    return resp.json()
+    return create_deployment_schedule(
+        deployment_id=deployment_id,
+        slug=slug,
+        schedule=schedule,
+        is_active=is_active,
+        parameters=parameters,
+    )
+
+
+def delete_deployment_schedule_by_slug(*, deployment_id: str, slug: str) -> None:
+    existing = next((item for item in list_deployment_schedules(deployment_id) if item.get('slug') == slug), None)
+    if existing and existing.get('id'):
+        delete_deployment_schedule(deployment_id=deployment_id, schedule_id=str(existing['id']))
 
 
 def list_deployments(limit: int = 200) -> list[Dict[str, Any]]:
     """List Prefect deployments for UI sync."""
-    url = f"{_api_base()}/deployments/filter"
-    resp = requests.post(
-        url,
+    resp = _request(
+        'post',
+        '/deployments/filter',
+        operation='list_deployments',
         json={'limit': max(int(limit), 1)},
-        headers=_headers(),
-        timeout=_timeout(),
     )
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect list_deployments returned {resp.status_code}: {resp.text[:500]}'
-        )
     data = resp.json()
     if isinstance(data, dict) and 'deployments' in data:
         return data.get('deployments') or []
@@ -220,14 +308,14 @@ def list_deployments(limit: int = 200) -> list[Dict[str, Any]]:
 
 def get_deployment(deployment_id: str) -> Dict[str, Any]:
     """Fetch a single Prefect deployment by id."""
-    url = f"{_api_base()}/deployments/{deployment_id}"
-    resp = requests.get(url, headers=_headers(), timeout=_timeout())
+    resp = _request(
+        'get',
+        f"/deployments/{deployment_id}",
+        operation='get_deployment',
+        allowed_statuses=(404,),
+    )
     if resp.status_code == 404:
         raise PrefectAPIError(f'Deployment {deployment_id} not found on Prefect.')
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect get_deployment returned {resp.status_code}: {resp.text[:500]}'
-        )
     return resp.json()
 
 
@@ -237,12 +325,12 @@ def update_deployment(
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Update deployment metadata (name/description/tags/parameters)."""
-    url = f"{_api_base()}/deployments/{deployment_id}"
-    resp = requests.patch(url, json=payload, headers=_headers(), timeout=_timeout())
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect update_deployment returned {resp.status_code}: {resp.text[:500]}'
-        )
+    resp = _request(
+        'patch',
+        f"/deployments/{deployment_id}",
+        operation='update_deployment',
+        json=payload,
+    )
     if not resp.text.strip():
         return {}
     return resp.json()
@@ -255,26 +343,21 @@ def has_api() -> bool:
 
 def get_flow_by_name(flow_name: str) -> Dict[str, Any] | None:
     """Fetch a Prefect flow by name if it exists."""
-    url = f"{_api_base()}/flows/name/{flow_name}"
-    resp = requests.get(url, headers=_headers(), timeout=_timeout())
+    resp = _request(
+        'get',
+        f"/flows/name/{flow_name}",
+        operation='get_flow_by_name',
+        allowed_statuses=(404,),
+    )
     if resp.status_code == 404:
         return None
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect get_flow_by_name returned {resp.status_code}: {resp.text[:500]}'
-        )
     return resp.json()
 
 
 def create_flow(flow_name: str) -> Dict[str, Any]:
     """Create a Prefect flow if it does not already exist."""
-    url = f"{_api_base()}/flows/"
     payload = {'name': flow_name}
-    resp = requests.post(url, json=payload, headers=_headers(), timeout=_timeout())
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect create_flow returned {resp.status_code}: {resp.text[:500]}'
-        )
+    resp = _request('post', '/flows/', operation='create_flow', json=payload)
     return resp.json()
 
 
@@ -301,7 +384,6 @@ def create_deployment(
     pull_steps: list[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Create a Prefect deployment for the given flow."""
-    url = f"{_api_base()}/deployments/"
     payload: Dict[str, Any] = {
         'flow_id': flow_id,
         'name': name,
@@ -321,9 +403,5 @@ def create_deployment(
         payload['path'] = str(path)
     if pull_steps is not None:
         payload['pull_steps'] = list(pull_steps)
-    resp = requests.post(url, json=payload, headers=_headers(), timeout=_timeout())
-    if resp.status_code >= 400:
-        raise PrefectAPIError(
-            f'Prefect create_deployment returned {resp.status_code}: {resp.text[:500]}'
-        )
+    resp = _request('post', '/deployments/', operation='create_deployment', json=payload)
     return resp.json()

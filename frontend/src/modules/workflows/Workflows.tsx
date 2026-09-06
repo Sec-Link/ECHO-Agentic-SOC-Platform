@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   App,
   Card,
@@ -133,9 +133,30 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [triggerFilter, setTriggerFilter] = useState<string>('');
   const [bindings, setBindings] = useState<TicketWorkflowBinding[]>([]);
+  const workflowRequestId = useRef(0);
+  const workflowRequestInFlight = useRef<Promise<Workflow[]> | null>(null);
 
-  const fetchWorkflows = useCallback(async () => {
-    setLoading(true);
+  const fetchWorkflows = useCallback(async (silent = false) => {
+    if (silent && workflowRequestInFlight.current) {
+      try {
+        await workflowRequestInFlight.current;
+      } catch {
+        // Retry on the next polling interval.
+      }
+      return;
+    }
+    const requestId = ++workflowRequestId.current;
+    if (!silent) setLoading(true);
+    const previousRequest = workflowRequestInFlight.current;
+    if (previousRequest) {
+      try {
+        await previousRequest;
+      } catch {
+        // The latest queued request still needs a chance to refresh the list.
+      }
+    }
+    if (requestId !== workflowRequestId.current) return;
+
     try {
       const params: any = {};
       if (search) params.search = search;
@@ -144,12 +165,20 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
       else if (statusFilter === 'draft') params.is_draft = true;
       if (triggerFilter) params.trigger_type = triggerFilter;
 
-      const data = await listWorkflows(params);
+      const request = listWorkflows(params);
+      workflowRequestInFlight.current = request;
+      const data = await request;
+      if (requestId !== workflowRequestId.current) return;
       setWorkflows(Array.isArray(data) ? data : []);
     } catch (err: any) {
-      message.error('Failed to load workflows');
+      if (!silent && requestId === workflowRequestId.current) {
+        message.error('Failed to load workflows');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === workflowRequestId.current) {
+        workflowRequestInFlight.current = null;
+      }
+      if (requestId === workflowRequestId.current) setLoading(false);
     }
   }, [search, statusFilter, triggerFilter]);
 
@@ -175,7 +204,26 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
     fetchWorkflows();
     fetchStats();
     fetchBindings();
+    return () => {
+      workflowRequestId.current += 1;
+    };
   }, [fetchWorkflows, fetchStats, fetchBindings]);
+
+  const hasRunningWorkflow = workflows.some(isWorkflowRunning);
+  useEffect(() => {
+    if (!hasRunningWorkflow) return;
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await fetchWorkflows(true);
+      if (!cancelled) timeout = setTimeout(poll, 5000);
+    };
+    timeout = setTimeout(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [hasRunningWorkflow, fetchWorkflows]);
 
   const getWorkflowBindings = useCallback((workflowId: string) => (
     bindings.filter((item) => item.workflow === workflowId)
@@ -446,6 +494,9 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
                 <Tag>Unpublished</Tag>
               ) : null}
               {record.has_unpublished_changes && <Tag color="red">Changes</Tag>}
+              {record.execution_engine === 'local' && (
+                <Tag color="red">Legacy Local / unavailable</Tag>
+              )}
             </Space>
             {runInfo.hint && (
               <span style={{ fontSize: 11, color: '#888' }}>{runInfo.hint}</span>
@@ -513,9 +564,12 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
       width: 230,
       render: (_: any, record: Workflow) => {
         const running = isWorkflowRunning(record);
+        const isLegacyLocal = record.execution_engine === 'local';
         const hasPublishedManifest = Boolean(record.published_version);
-        const canExecute = record.is_active && hasPublishedManifest;
-        const executeTooltip = !record.is_active
+        const canExecute = !isLegacyLocal && record.is_active && hasPublishedManifest;
+        const executeTooltip = isLegacyLocal
+          ? 'Legacy Local execution is unavailable. Publish this workflow to use Prefect.'
+          : !record.is_active
           ? 'Activate this workflow before execution'
           : !hasPublishedManifest
             ? 'Publish this workflow before execution'
@@ -662,7 +716,7 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
                 prefix={<SearchOutlined />}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                onPressEnter={fetchWorkflows}
+                onPressEnter={() => fetchWorkflows()}
                 style={{ width: 250 }}
                 allowClear
               />
@@ -688,7 +742,7 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
                   <Select.Option key={value} value={value}>{label}</Select.Option>
                 ))}
               </Select>
-              <Button icon={<ReloadOutlined />} onClick={fetchWorkflows}>
+              <Button icon={<ReloadOutlined />} onClick={() => fetchWorkflows()}>
                 Refresh
               </Button>
             </Space>

@@ -114,7 +114,6 @@ class Workflow(models.Model):
     ]
 
     EXECUTION_ENGINES = [
-        ('local', 'Local (Django)'),
         ('prefect', 'Prefect'),
     ]
 
@@ -122,14 +121,12 @@ class Workflow(models.Model):
     name = models.CharField(max_length=200, help_text="Workflow name")
     description = models.TextField(blank=True, help_text="Workflow description")
 
-    # Selects which executor handles this workflow. ``local`` keeps the
-    # original in-process Django engine; ``prefect`` delegates execution to
-    # the configured Prefect deployment via ``prefect_dispatcher``.
+    # Historical rows may still contain ``local``. New workflows use Prefect.
     execution_engine = models.CharField(
         max_length=20,
         choices=EXECUTION_ENGINES,
-        default='local',
-        help_text="Engine that runs this workflow: local (Django) or prefect."
+        default='prefect',
+        help_text="Engine that runs this workflow. New workflows use Prefect."
     )
     prefect_deployment_id = models.CharField(
         max_length=64,
@@ -476,6 +473,9 @@ class WorkflowExecution(models.Model):
         related_name='executions',
         help_text="Workflow being executed"
     )
+    workflow_version = models.PositiveIntegerField(
+        help_text="Immutable published workflow version used by this execution",
+    )
 
     # Trigger information
     trigger_source = models.CharField(
@@ -544,9 +544,8 @@ class WorkflowExecution(models.Model):
         help_text="User who triggered this execution"
     )
 
-    # Django 6.0 Background Tasks integration.
-    # Stores the TaskResult.id returned by run_workflow_task.enqueue() so
-    # callers can correlate this execution record with the task framework.
+    # Kept under its existing name to avoid a schema-only rename. Prefect-backed
+    # executions store the Prefect Flow Run ID here.
     task_result_id = models.CharField(
         max_length=64,
         blank=True,
@@ -561,6 +560,13 @@ class WorkflowExecution(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Workflow Execution'
         verbose_name_plural = 'Workflow Executions'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['task_result_id'],
+                condition=~models.Q(task_result_id=''),
+                name='uniq_workflow_execution_flow_run',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.workflow.name} - {self.status} ({self.id})"
@@ -614,9 +620,26 @@ class StepExecution(models.Model):
     )
     step = models.ForeignKey(
         WorkflowStep,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='executions',
-        help_text="Step being executed"
+        help_text="Current draft step when it still exists",
+    )
+    source_step_id = models.UUIDField(
+        help_text="Immutable step ID from the published workflow manifest",
+    )
+    step_name = models.CharField(
+        max_length=200,
+        help_text="Immutable step name from the published workflow manifest",
+    )
+    step_order = models.PositiveIntegerField(
+        help_text="Immutable step order from the published workflow manifest",
+    )
+    action_type = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Immutable action type from the published workflow manifest",
     )
 
     # Execution status
@@ -665,12 +688,18 @@ class StepExecution(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['workflow_execution', 'step__order']
+        ordering = ['workflow_execution', 'step_order']
         verbose_name = 'Step Execution'
         verbose_name_plural = 'Step Executions'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['workflow_execution', 'source_step_id'],
+                name='uniq_step_exec_source',
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.step.name} - {self.status}"
+        return f"{self.step_name} - {self.status}"
 
     def save(self, *args, **kwargs):
         from .secret_config import prepare_config_for_storage
@@ -684,6 +713,8 @@ class StepExecution(models.Model):
                 or {}
             )
         current = self.input_data or {}
+        if not isinstance(current, dict):
+            return super().save(*args, **kwargs)
         if isinstance(current.get("action_config"), dict):
             secured = dict(current)
             existing_action_config = (
@@ -692,13 +723,13 @@ class StepExecution(models.Model):
                 else {}
             )
             secured["action_config"] = prepare_config_for_storage(
-                self.step.action_type,
+                self.action_type,
                 current["action_config"],
                 existing=existing_action_config,
             )
         else:
             secured = prepare_config_for_storage(
-                self.step.action_type,
+                self.action_type,
                 current,
                 existing=existing,
             )

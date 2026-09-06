@@ -1,9 +1,4 @@
-"""
-Prefect task wrappers and workflow background tasks.
-
-Each task in this package maps a workflow node action to a Prefect task so
-executions appear in the Prefect UI with step-level visibility.
-"""
+"""Django background task used to submit event-triggered workflows."""
 from __future__ import annotations
 
 import logging
@@ -11,40 +6,7 @@ from typing import Optional
 
 from django.tasks import task
 
-from .condition import condition_task
-from .containment import block_ip_task, disable_user_task
-from .notification import send_email_task, send_webhook_task
-from .release import release_ip_task, enable_user_task
-from .threat_intel import ip_lookup_task, hash_lookup_task
-from .ticketing import create_ticket_task, update_ticket_task
-from .utility import log_task, delay_task
-
 logger = logging.getLogger(__name__)
-
-
-@task(queue_name="default")
-def run_workflow_task(execution_id: str) -> dict:
-    """Execute a WorkflowExecution identified by *execution_id*."""
-    from ..models import WorkflowExecution
-    from ..engines import run_execution
-
-    logger.info("Background task: starting workflow execution %s", execution_id)
-    execution = WorkflowExecution.objects.select_related("workflow").get(id=execution_id)
-
-    try:
-        run_execution(execution)
-    except Exception as exc:
-        logger.exception(
-            "Background task: workflow execution %s failed: %s", execution_id, exc
-        )
-        raise
-
-    logger.info(
-        "Background task: workflow execution %s finished with status '%s'",
-        execution_id,
-        execution.status,
-    )
-    return {"execution_id": execution_id, "status": execution.status}
 
 
 @task(queue_name="default")
@@ -74,6 +36,7 @@ def trigger_workflows_for_event_task(
         trigger_type=trigger_type,
         is_active=True,
         is_draft=False,
+        execution_engine='prefect',
     )
 
     triggered = 0
@@ -107,20 +70,6 @@ def trigger_workflows_for_event_task(
 
 
 __all__ = [
-    "condition_task",
-    "block_ip_task",
-    "disable_user_task",
-    "send_email_task",
-    "send_webhook_task",
-    "release_ip_task",
-    "enable_user_task",
-    "ip_lookup_task",
-    "hash_lookup_task",
-    "create_ticket_task",
-    "update_ticket_task",
-    "log_task",
-    "delay_task",
-    "run_workflow_task",
     "trigger_workflows_for_event_task",
 ]
 

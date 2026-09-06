@@ -170,14 +170,17 @@ export default function BasicLayout({
     else if (['detection','integrations', 'orchestrator', 'correlation'].includes(selectedKey)) setOpenKeys(['dataPipelineGroup']);
     else if (['interfaces', 'workflows', 'workflow-executions'].includes(selectedKey)) {
       setOpenKeys(['automationGroup']);
-    } else if (['permissions', 'ai-assistant', 'registration-approvals', 'audit-logs'].includes(selectedKey)) {
+    } else if (['permissions', 'ai-assistant', 'registration-approvals', 'audit-logs', 'system-settings'].includes(selectedKey)) {
       setOpenKeys(['administrationGroup']);
     } else {
       setOpenKeys(['monitorGroup']);
     }
   }, [selectedKey]);
 
-  const canAccess = (perm?: string) => {
+  const canAccess = (perm?: string, key?: RouteKey) => {
+    if (key === 'system-settings') {
+      return !impersonation && Boolean(rbacMe?.is_staff);
+    }
     if (!perm) return true;
     if (!rbacMe && !impersonation) return true;
     if (!impersonation && rbacMe?.is_superuser) return true;
@@ -197,8 +200,9 @@ export default function BasicLayout({
         { key: 'permissions' as RouteKey, label: 'Access Management' },
         { key: 'registration-approvals' as RouteKey, label: 'Approvals' },
         { key: 'audit-logs' as RouteKey, label: 'Audit Logs' },
+        { key: 'system-settings' as RouteKey, label: 'System Settings' },
         { key: 'ai-assistant' as RouteKey, label: 'AI Assistant' },
-      ].filter((item) => canAccess(permissionByKey[item.key])),
+      ].filter((item) => canAccess(permissionByKey[item.key], item.key)),
     [effectivePermissions, impersonation, rbacMe]
   );
 
@@ -271,7 +275,7 @@ export default function BasicLayout({
   );
 
   const currentPerm = permissionByKey[selectedKey];
-  const content = canAccess(currentPerm) ? children : renderDenied();
+  const content = canAccess(currentPerm, selectedKey) ? children : renderDenied();
   const antdThemeConfig = useMemo(
     () =>
       uiTheme === 'dark'

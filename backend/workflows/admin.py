@@ -35,6 +35,12 @@ class WorkflowAdmin(admin.ModelAdmin):
     readonly_fields = ['id', 'created_at', 'updated_at']
     inlines = [WorkflowStepInline]
 
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(super().get_readonly_fields(request, obj))
+        if obj and obj.execution_engine == 'local':
+            fields.append('execution_engine')
+        return fields
+
 
 @admin.register(WorkflowStep)
 class WorkflowStepAdmin(admin.ModelAdmin):
@@ -47,23 +53,34 @@ class WorkflowStepAdmin(admin.ModelAdmin):
 class StepExecutionInline(admin.TabularInline):
     model = StepExecution
     extra = 0
-    fields = ['step', 'status', 'started_at', 'completed_at']
-    readonly_fields = ['id', 'step', 'status', 'started_at', 'completed_at']
+    fields = ['source_step_id', 'step_name', 'step_order', 'action_type', 'status', 'started_at', 'completed_at']
+    readonly_fields = ['id', 'source_step_id', 'step_name', 'step_order', 'action_type', 'status', 'started_at', 'completed_at']
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WorkflowExecution)
 class WorkflowExecutionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'workflow', 'status', 'progress_percent', 'executed_by', 'started_at', 'completed_at']
+    list_display = ['id', 'workflow', 'workflow_version', 'status', 'progress_percent', 'executed_by', 'started_at', 'completed_at']
     list_filter = ['status', 'workflow']
     search_fields = ['workflow__name', 'trigger_source']
-    readonly_fields = ['id', 'created_at', 'updated_at']
+    readonly_fields = ['id', 'workflow_version', 'created_at', 'updated_at']
     inlines = [StepExecutionInline]
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(StepExecution)
 class StepExecutionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'step', 'status', 'attempt_number', 'started_at', 'completed_at']
+    list_display = ['id', 'step_name', 'source_step_id', 'action_type', 'status', 'attempt_number', 'started_at', 'completed_at']
     list_filter = ['status']
+    readonly_fields = ['source_step_id', 'step_name', 'step_order', 'action_type']
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(SavedWorkflowNode)

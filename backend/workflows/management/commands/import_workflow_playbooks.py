@@ -46,7 +46,7 @@ class Command(BaseCommand):
         if workflow.prefect_deployment_id:
             try:
                 deployment = prefect_client.get_deployment(workflow.prefect_deployment_id)
-                if not deployment.get('path') or deployment.get('entrypoint') != 'workflows/prefect_flow.py:run_soar_workflow':
+                if deployment.get('entrypoint') != 'backend/workflows/prefect/flow.py:run_soar_workflow':
                     workflow.prefect_deployment_id = ''
                     workflow.save(update_fields=['prefect_deployment_id'])
             except prefect_client.PrefectAPIError:
@@ -54,8 +54,8 @@ class Command(BaseCommand):
                 workflow.save(update_fields=['prefect_deployment_id'])
 
         workflow_viewset = WorkflowViewSet()
-        workflow_viewset._sync_default_schedule(workflow)
         workflow_viewset._ensure_prefect_deployment(workflow)
+        workflow_viewset._sync_default_schedule(workflow)
         workflow_viewset._sync_prefect_deployment(workflow)
 
         self.stdout.write(self.style.SUCCESS(f'Imported workflow: {workflow.name}'))

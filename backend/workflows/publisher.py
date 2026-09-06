@@ -9,10 +9,12 @@ from copy import deepcopy
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from uuid import UUID
 
-from .models import Workflow
+from .prefect.actions import ActionRegistry
+
+from .models import Workflow, WorkflowStep
 from .persistence import persist_workflow_definition
-from .prefect_dispatcher import _serialize_workflow
 from .secret_config import (
     SecretConfigError,
     decrypt_sensitive_value,
@@ -20,12 +22,48 @@ from .secret_config import (
     prepare_config_for_storage,
     sensitive_fields,
 )
-from .flows.generic_workflow_flow import ACTION_TASKS
 
 logger = logging.getLogger(__name__)
 
 GENERATED_FLOWS_DIR = Path(__file__).resolve().parent / 'flows' / 'generated'
 CURRENT_POINTER_FILENAME = 'current.json'
+
+
+def _serialize_step(step: WorkflowStep) -> Dict[str, Any]:
+    config: Dict[str, Any] = {}
+    if step.action_template and step.action_template.default_config:
+        config.update(step.action_template.default_config)
+    config.update(step.action_config or {})
+    return {
+        'id': str(step.id),
+        'order': step.order,
+        'name': step.name,
+        'node_type': step.node_type,
+        'node_category': step.node_category,
+        'action_type': step.action_type,
+        'action_config': config,
+        'timeout_seconds': step.timeout_seconds,
+        'on_failure': step.on_failure,
+        'retry_count': step.retry_count,
+        'retry_delay_seconds': step.retry_delay_seconds,
+        'condition': step.condition or {},
+        'next_step_true': str(step.next_step_true) if step.next_step_true else None,
+        'next_step_false': str(step.next_step_false) if step.next_step_false else None,
+        'connections': list(step.connections or []),
+        'is_active': step.is_active,
+    }
+
+
+def serialize_workflow(workflow: Workflow) -> Dict[str, Any]:
+    steps = workflow.steps.filter(is_active=True).select_related('action_template').order_by('order')
+    return {
+        'id': str(workflow.id),
+        'name': workflow.name,
+        'description': workflow.description,
+        'trigger_type': workflow.trigger_type,
+        'edges': workflow.edges or [],
+        'steps': [_serialize_step(step) for step in steps],
+    }
 
 
 def _workflow_dir(workflow: Workflow) -> Path:
@@ -51,12 +89,27 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
         raise
 
 
+def _atomic_create_json(path: Path, payload: Dict[str, Any]) -> None:
+    """Atomically create an immutable JSON file without replacing a peer."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=path.stem + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False, default=str)
+        os.link(temp_path, path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+
 def _active_steps(workflow: Workflow) -> List[Dict[str, Any]]:
-    return list((_serialize_workflow(workflow).get('steps') or []))
+    return list((serialize_workflow(workflow).get('steps') or []))
 
 
 def _validate_action_types(steps: Iterable[Dict[str, Any]]) -> None:
-    supported = set(ACTION_TASKS.keys())
+    supported = set(ActionRegistry.get_all_actions())
     invalid: List[str] = []
     for step in steps:
         node_type = step.get('node_type')
@@ -97,13 +150,13 @@ def _validate_action_configs(steps: Iterable[Dict[str, Any]]) -> None:
 
 
 def _build_manifest_record(workflow: Workflow, version: int) -> Dict[str, Any]:
-    payload = _serialize_workflow(workflow)
+    payload = serialize_workflow(workflow)
     payload['trigger_conditions'] = workflow.trigger_conditions or {}
     payload['_meta'] = {
         'published_at': datetime.now(dt_timezone.utc).isoformat(),
         'workflow_db_id': str(workflow.id),
         'version': version,
-        'execution_engine': workflow.execution_engine,
+        'execution_engine': 'prefect',
         'trigger_type': workflow.trigger_type,
         'trigger_conditions': workflow.trigger_conditions or {},
         'schedule_cron': workflow.schedule_cron or None,
@@ -153,11 +206,10 @@ def load_current_published_manifest(workflow: Workflow) -> tuple[Dict[str, Any],
         raise ValueError('Published manifest pointer is incomplete.')
     if Path(manifest_filename).name != manifest_filename:
         raise ValueError('Published manifest filename is invalid.')
+    if str(pointer.get('workflow_id') or '') != str(workflow.id):
+        raise ValueError('Published manifest pointer belongs to another workflow.')
 
-    manifest = load_manifest_definition(workflow, manifest_version)
-    meta = manifest.get('_meta') or {}
-    if int(meta.get('version') or 0) != manifest_version:
-        raise ValueError('Published manifest version does not match its pointer.')
+    manifest = load_published_manifest(workflow, manifest_version)
     if manifest_filename != _manifest_filename(manifest_version):
         raise ValueError('Published manifest filename does not match its version.')
     return pointer, manifest
@@ -191,11 +243,20 @@ def build_published_export(workflow: Workflow) -> tuple[Dict[str, Any], Dict[str
 
 
 def _next_publish_version(workflow: Workflow) -> int:
+    published_versions = [
+        int(path.stem[1:])
+        for path in _workflow_dir(workflow).glob('v*.json')
+        if path.stem[1:].isdigit() and int(path.stem[1:]) > 0
+    ]
     try:
         pointer = resolve_manifest_metadata(workflow)
-        return int(pointer.get('current_version') or 0) + 1
+        pointer_version = int(pointer.get('current_version') or 0)
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
-        return max(int(workflow.version or 1), 1)
+        pointer_version = 0
+
+    if published_versions or pointer_version > 0:
+        return max([int(workflow.version or 1), pointer_version, *published_versions]) + 1
+    return max(int(workflow.version or 1), 1)
 
 
 def load_manifest_definition(workflow: Workflow, version: int) -> Dict[str, Any]:
@@ -204,6 +265,108 @@ def load_manifest_definition(workflow: Workflow, version: int) -> Dict[str, Any]
         raise FileNotFoundError(f'Published manifest not found: {manifest_path.name}')
     with open(manifest_path, 'r', encoding='utf-8') as handle:
         return json.load(handle)
+
+
+def _validate_published_manifest(
+    workflow: Workflow,
+    version: int,
+    manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate the identity and executable structure of one manifest."""
+    if not isinstance(manifest, dict):
+        raise ValueError('Published workflow manifest must be an object.')
+    meta = manifest.get('_meta')
+    if not isinstance(meta, dict):
+        raise ValueError('Published workflow manifest metadata is invalid.')
+    if str(manifest.get('id') or '') != str(workflow.id) or str(meta.get('workflow_db_id') or '') != str(workflow.id):
+        raise ValueError('Published workflow manifest belongs to another workflow.')
+    try:
+        manifest_version = int(meta.get('version') or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Published workflow manifest version is invalid.') from exc
+    if manifest_version != version:
+        raise ValueError('Published workflow manifest version does not match the requested version.')
+    if str(meta.get('manifest_filename') or '') != _manifest_filename(version):
+        raise ValueError('Published workflow manifest filename does not match its version.')
+
+    steps = manifest.get('steps')
+    if not isinstance(steps, list):
+        raise ValueError('Published workflow manifest steps must be a list.')
+    step_ids = set()
+    validated_steps = []
+    node_types = {choice[0] for choice in WorkflowStep.NODE_TYPE_CHOICES}
+    failure_modes = {choice[0] for choice in WorkflowStep.ON_FAILURE_CHOICES}
+    for step in steps:
+        if not isinstance(step, dict):
+            raise ValueError('Published workflow manifest contains an invalid step.')
+        try:
+            step_id = str(UUID(str(step.get('id') or '')))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError('Published workflow manifest contains an invalid step ID.') from exc
+        if step_id in step_ids:
+            raise ValueError(f'Published workflow manifest contains duplicate step ID {step_id}.')
+        step_ids.add(step_id)
+        if not isinstance(step.get('name'), str):
+            raise ValueError(f'Published workflow step {step_id} has an invalid name.')
+        order = step.get('order')
+        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+            raise ValueError(f'Published workflow step {step_id} has an invalid order.')
+        node_type = step.get('node_type')
+        if node_type not in node_types:
+            raise ValueError(f'Published workflow step {step_id} has an invalid node type.')
+        action_type = step.get('action_type')
+        if not isinstance(action_type, str) or (node_type == 'action' and not action_type.strip()):
+            raise ValueError(f'Published workflow step {step_id} has an invalid action type.')
+        if not isinstance(step.get('node_category'), str):
+            raise ValueError(f'Published workflow step {step_id} has an invalid node category.')
+        if not isinstance(step.get('action_config'), dict):
+            raise ValueError(f'Published workflow step {step_id} has an invalid action config.')
+        if not isinstance(step.get('condition'), dict):
+            raise ValueError(f'Published workflow step {step_id} has an invalid condition.')
+        if not isinstance(step.get('connections'), list):
+            raise ValueError(f'Published workflow step {step_id} has invalid connections.')
+        if step.get('on_failure') not in failure_modes:
+            raise ValueError(f'Published workflow step {step_id} has an invalid failure mode.')
+        for field in ('timeout_seconds', 'retry_count', 'retry_delay_seconds'):
+            value = step.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f'Published workflow step {step_id} has an invalid {field}.')
+        if not isinstance(step.get('is_active'), bool):
+            raise ValueError(f'Published workflow step {step_id} has an invalid active flag.')
+        validated_steps.append((step_id, step))
+
+    for step_id, step in validated_steps:
+        targets = list(step['connections'])
+        targets.extend(
+            step.get(field)
+            for field in ('next_step_true', 'next_step_false')
+            if step.get(field) is not None
+        )
+        for target in targets:
+            try:
+                target_id = str(UUID(str(target)))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError(f'Published workflow step {step_id} has an invalid target step ID.') from exc
+            if target_id not in step_ids:
+                raise ValueError(
+                    f'Published workflow step {step_id} references missing step {target_id}.'
+                )
+    return manifest
+
+
+def load_published_manifest(workflow: Workflow, version: int) -> Dict[str, Any]:
+    """Load one immutable workflow version and validate its execution identity."""
+    try:
+        version = int(version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Published manifest version is invalid.') from exc
+    if version < 1:
+        raise ValueError('Published manifest version is invalid.')
+    return _validate_published_manifest(
+        workflow,
+        version,
+        load_manifest_definition(workflow, version),
+    )
 
 
 def load_manifest_definition_by_ref(manifest_ref: str) -> Dict[str, Any]:
@@ -225,11 +388,14 @@ def publish_workflow(
 
     publish_version = _next_publish_version(workflow)
     manifest = _build_manifest_record(workflow, publish_version)
+    _validate_published_manifest(workflow, publish_version, manifest)
     manifest_path = _manifest_path_for_version(workflow, publish_version)
     pointer_path = _current_pointer_path(workflow)
     published_at = manifest['_meta']['published_at']
 
-    _atomic_write_json(manifest_path, manifest)
+    if manifest_path.exists():
+        raise FileExistsError(f'Published manifest already exists: {manifest_path.name}')
+    _atomic_create_json(manifest_path, manifest)
     _atomic_write_json(pointer_path, _current_pointer_payload(workflow, publish_version, published_at))
 
     workflow.version = publish_version

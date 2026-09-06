@@ -46,7 +46,7 @@ const toCategoryLabel = (value: string): string => {
 
 const actionIcons: Record<string, React.ReactNode> = {
   send_email: <MailOutlined />,
-  send_webhook: <ApiOutlined />,
+  api_call: <ApiOutlined />,
   ip_lookup: <SearchOutlined />,
   hash_lookup: <SearchOutlined />,
   block_ip: <LockOutlined />,

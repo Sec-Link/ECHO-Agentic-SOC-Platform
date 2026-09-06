@@ -14,6 +14,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 
 from rest_framework import permissions, status, viewsets
+from rest_framework.authentication import TokenAuthentication
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -37,6 +38,8 @@ from .serializers import (
     WorkflowExecuteSerializer,
     WorkflowExecutionDetailSerializer,
     WorkflowExecutionListSerializer,
+    RuntimeRegistrationSerializer,
+    RuntimeSnapshotSerializer,
     WorkflowListSerializer,
     WorkflowStepCreateSerializer,
     WorkflowStepSerializer,
@@ -49,6 +52,13 @@ from .ticket_invocation import dispatch_ticket_event, find_callable_workflows, g
 
 
 logger = logging.getLogger(__name__)
+
+
+class StaffTokenAuthentication(TokenAuthentication):
+    """Keep internal endpoint authentication failures consistently at 403."""
+
+    def authenticate_header(self, request):
+        return None
 
 
 class ActionTemplateViewSet(viewsets.ModelViewSet):
@@ -95,9 +105,9 @@ class ActionTemplateViewSet(viewsets.ModelViewSet):
                 'category': 'notification',
             },
             {
-                'action_type': 'send_webhook',
-                'name': 'Security Alert Webhook',
-                'description': 'Send a security notification webhook',
+                'action_type': 'api_call',
+                'name': 'API Call',
+                'description': 'Call an HTTP API with configurable request data',
                 'category': 'notification',
             },
         ]
@@ -159,9 +169,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
         return queryset
 
-    def _prefect_flow_name(self, workflow: Workflow) -> str:
-        return "soar-generic"
-
     def _ensure_prefect_deployment(self, workflow: Workflow) -> None:
         if workflow.execution_engine != 'prefect':
             return
@@ -214,36 +221,25 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
 
-    @staticmethod
-    def _prefect_schedule_payload(schedule: WorkflowSchedule | None) -> Dict[str, Any] | None:
-        if not schedule:
-            return None
-        if schedule.schedule_type == 'interval':
-            return {'interval': schedule.interval_seconds or 0}
-        return {'cron': schedule.cron or '', 'timezone': schedule.timezone or 'UTC'}
-
     def _sync_prefect_schedule(self, schedule: WorkflowSchedule | None, workflow: Workflow) -> None:
-        if workflow.execution_engine != 'prefect':
+        if schedule is None or workflow.execution_engine != 'prefect':
             return
         deployment_id = (workflow.prefect_deployment_id or '').strip() or None
         if not prefect_client.is_configured(deployment_id):
             return
-        schedule_payload = self._prefect_schedule_payload(schedule)
-        if schedule_payload is None:
-            return
         try:
-            prefect_client.update_deployment_schedule(
-                deployment_id=prefect_client.resolve_deployment_id(deployment_id),
-                schedule=schedule_payload,
-                is_active=bool(schedule.is_active) if schedule else False,
-            )
-        except prefect_client.PrefectAPIError as exc:
+            from .prefect_dispatcher import sync_schedule
+            sync_schedule(schedule)
+        except (OSError, ValueError, prefect_client.PrefectAPIError) as exc:
             logger.warning('Prefect schedule sync failed for workflow %s: %s', workflow.id, exc)
 
     def _sync_default_schedule(self, workflow: Workflow) -> None:
         if workflow.trigger_type != 'scheduled' or not workflow.schedule_cron:
-            WorkflowSchedule.objects.filter(workflow=workflow, name='default').update(is_active=False)
-            self._sync_prefect_schedule(None, workflow)
+            schedule = WorkflowSchedule.objects.filter(workflow=workflow, name='default').first()
+            if schedule:
+                schedule.is_active = False
+                schedule.save(update_fields=['is_active'])
+                self._sync_prefect_schedule(schedule, workflow)
             return
 
         schedule, _ = WorkflowSchedule.objects.update_or_create(
@@ -267,14 +263,14 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         workflow = serializer.save(created_by=self.request.user)
-        self._sync_default_schedule(workflow)
         self._ensure_prefect_deployment(workflow)
+        self._sync_default_schedule(workflow)
         self._sync_prefect_deployment(workflow)
 
     def perform_update(self, serializer):
         workflow = serializer.save()
-        self._sync_default_schedule(workflow)
         self._ensure_prefect_deployment(workflow)
+        self._sync_default_schedule(workflow)
         self._sync_prefect_deployment(workflow)
 
 
@@ -361,12 +357,6 @@ class WorkflowScheduleViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
         return queryset
 
-    @staticmethod
-    def _prefect_schedule_payload(schedule: WorkflowSchedule) -> Dict[str, Any] | None:
-        if schedule.schedule_type == 'interval':
-            return {'interval': schedule.interval_seconds or 0}
-        return {'cron': schedule.cron or '', 'timezone': schedule.timezone or 'UTC'}
-
     def _sync_prefect_schedule(self, schedule: WorkflowSchedule) -> None:
         workflow = schedule.workflow
         if workflow.execution_engine != 'prefect':
@@ -374,14 +364,8 @@ class WorkflowScheduleViewSet(viewsets.ModelViewSet):
         deployment_id = (workflow.prefect_deployment_id or '').strip() or None
         if not prefect_client.is_configured(deployment_id):
             return
-        try:
-            prefect_client.update_deployment_schedule(
-                deployment_id=prefect_client.resolve_deployment_id(deployment_id),
-                schedule=self._prefect_schedule_payload(schedule),
-                is_active=bool(schedule.is_active),
-            )
-        except prefect_client.PrefectAPIError as exc:
-            logger.warning('Prefect schedule sync failed for schedule %s: %s', schedule.id, exc)
+        from .prefect_dispatcher import sync_schedule
+        sync_schedule(schedule)
 
     def perform_create(self, serializer):
         schedule = serializer.save(created_by=self.request.user)
@@ -390,6 +374,11 @@ class WorkflowScheduleViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         schedule = serializer.save()
         self._sync_prefect_schedule(schedule)
+
+    def perform_destroy(self, instance):
+        from .prefect_dispatcher import delete_schedule
+        delete_schedule(instance)
+        instance.delete()
 
     @action(detail=True, methods=['post'])
     def pause(self, request, pk=None):
@@ -487,6 +476,64 @@ class WorkflowExecutionViewSet(viewsets.ReadOnlyModelViewSet):
 
         return queryset
 
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='register-runtime',
+        authentication_classes=[StaffTokenAuthentication],
+        permission_classes=[permissions.IsAdminUser],
+    )
+    def register_runtime(self, request):
+        serializer = RuntimeRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            from .prefect_dispatcher import register_runtime_execution
+
+            execution = register_runtime_execution(serializer.data)
+        except Workflow.DoesNotExist:
+            return Response(
+                {'error': 'Active Prefect workflow not found.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(
+            {'execution_id': str(execution.id)},
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='runtime-policy',
+        authentication_classes=[StaffTokenAuthentication],
+        permission_classes=[permissions.IsAdminUser],
+    )
+    def runtime_policy(self, request):
+        from accounts.models import SystemSettings
+
+        return Response({
+            'workflow_http_allowlist': SystemSettings.get_solo().workflow_http_allowlist,
+        })
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='runtime-sync',
+        authentication_classes=[StaffTokenAuthentication],
+        permission_classes=[permissions.IsAdminUser],
+    )
+    def runtime_sync(self, request, pk=None):
+        serializer = RuntimeSnapshotSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            from .prefect_dispatcher import apply_runtime_snapshot
+
+            execution = apply_runtime_snapshot(self.get_object(), serializer.data)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(WorkflowExecutionDetailSerializer(execution).data)
+
     def retrieve(self, request, *args, **kwargs):
         # Opportunistically reconcile non-terminal Prefect-backed executions
         # with the upstream flow run before serializing. Failures are
@@ -494,7 +541,10 @@ class WorkflowExecutionViewSet(viewsets.ReadOnlyModelViewSet):
         execution = self.get_object()
         if (
             execution.workflow.execution_engine == 'prefect'
-            and execution.status not in {'completed', 'failed', 'cancelled'}
+            and (
+                execution.status not in {'completed', 'failed', 'cancelled'}
+                or (execution.status == 'failed' and not execution.error_message)
+            )
             and execution.task_result_id
         ):
             try:
@@ -664,6 +714,13 @@ class WorkflowPublishView(APIView):
                 {'error': f'Workflow publish failed: {exc}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        for schedule in workflow.schedules.select_related('workflow').all():
+            try:
+                from .prefect_dispatcher import sync_schedule
+                sync_schedule(schedule)
+            except (OSError, ValueError, prefect_client.PrefectAPIError) as exc:
+                logger.warning('Published workflow schedule sync failed for %s: %s', schedule.id, exc)
 
         return Response({
             'status': 'published',

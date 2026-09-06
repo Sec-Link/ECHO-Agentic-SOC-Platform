@@ -648,7 +648,6 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
         name: '',
         description: '',
         trigger_type: 'manual',
-        execution_engine: 'local',
         webhook_source_id: undefined,
         alert_filters: [],
         alert_filter_logic: 'AND',
@@ -679,7 +678,6 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
           name: data.name,
           description: data.description,
           trigger_type: data.trigger_type,
-          execution_engine: data.execution_engine || 'local',
           webhook_source_id: data.trigger_conditions?.webhook_source_id,
           alert_filters: Array.isArray(data.trigger_conditions?.alert_filters) ? data.trigger_conditions.alert_filters : [],
           alert_filter_logic: data.trigger_conditions?.alert_filter_logic === 'OR' ? 'OR' : 'AND',
@@ -1099,8 +1097,6 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
         name: values.name,
         description: values.description || '',
         trigger_type: values.trigger_type,
-        // Controls whether the workflow runs locally or through Prefect.
-        execution_engine: values.execution_engine || 'local',
         trigger_conditions: buildTriggerConditions(values),
         schedule_cron: values.schedule_cron || null,
         is_active: activate || values.is_active,
@@ -1321,6 +1317,9 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
               {workflow?.has_unpublished_changes ? (
                 <Tag color="red" title="Workflow has been modified since the last publish.">Unpublished Changes</Tag>
               ) : null}
+              {workflow?.execution_engine === 'local' && (
+                <Tag color="red">Legacy Local / unavailable</Tag>
+              )}
             </Space>
           </Col>
           <Col>
@@ -1328,7 +1327,9 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
               {!isNew && (
                 <Tooltip
                   title={
-                    !workflow?.is_active
+                    workflow?.execution_engine === 'local'
+                      ? 'Legacy Local execution is unavailable. Publish this workflow to use Prefect.'
+                      : !workflow?.is_active
                       ? 'Activate this workflow before execution'
                       : !workflow?.published_version
                         ? 'Publish this workflow before execution'
@@ -1341,7 +1342,7 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
                     <Button
                       icon={<PlayCircleOutlined />}
                       onClick={handleExecute}
-                      disabled={!workflow?.is_active || !workflow?.published_version}
+                      disabled={workflow?.execution_engine === 'local' || !workflow?.is_active || !workflow?.published_version}
                     >
                       Execute
                     </Button>
@@ -1383,18 +1384,6 @@ const VisualWorkflowEditor: React.FC<VisualWorkflowEditorProps> = ({
                 <Select
                   options={triggerTypes}
                   onChange={handleTriggerTypeChange}
-                />
-              </Form.Item>
-              <Form.Item
-                name="execution_engine"
-                label="Execution Engine"
-                tooltip="Choose whether this workflow executes in Django or through Prefect."
-              >
-                <Select
-                  options={[
-                    { value: 'local', label: 'Local (Django)' },
-                    { value: 'prefect', label: 'Prefect' },
-                  ]}
                 />
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(prev, curr) => prev.trigger_type !== curr.trigger_type}>

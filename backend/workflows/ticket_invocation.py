@@ -9,6 +9,7 @@ def find_callable_workflows():
     return Workflow.objects.filter(
         is_active=True,
         is_draft=False,
+        execution_engine='prefect',
         is_callable_from_ticket=True,
     ).order_by('name')
 
@@ -37,6 +38,7 @@ def dispatch_ticket_event(trigger_event, ticket_data, executed_by=None):
         workflow__trigger_type='event',
         workflow__is_active=True,
         workflow__is_draft=False,
+        workflow__execution_engine='prefect',
         workflow__is_callable_from_ticket=True,
     )
 

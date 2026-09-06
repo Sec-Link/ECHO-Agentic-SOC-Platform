@@ -1,52 +1,29 @@
-"""
-Workflow Execution Engine
+"""Django control-plane entry point for workflow executions."""
+from __future__ import annotations
 
-DEPRECATED: Local execution is no longer used. The workflows module now
-relies on Prefect for all execution paths. This file is kept temporarily to
-preserve imports and ease migration, but callers should use Prefect only.
+from typing import Any, Dict, Optional
 
-This module handles the orchestration and execution of workflows.
-It contains two main concerns:
-
-1. ``WorkflowEngine`` – pure execution logic that processes steps in order,
-   evaluates conditions, and persists ``StepExecution`` records.  This class
-   is called directly by the Django 6.0 background task defined in
-   ``workflows.tasks``.
-
-2. ``execute_workflow`` – a convenience service function that creates a
-   ``WorkflowExecution`` record and enqueues ``run_workflow_task`` via
-   Django 6.0's ``django.tasks`` backend.  Callers (views, signals) should
-   use this function rather than calling ``WorkflowEngine`` directly.
-"""
-import logging
-import traceback
-from typing import Optional, Dict, Any
 from django.utils import timezone
 
-from .models import Workflow, WorkflowStep, WorkflowExecution, StepExecution
-from .actions import ActionRegistry, ActionResult
-from .condition_evaluator import (
-    evaluate_condition_object as shared_evaluate_condition_object,
-    extract_condition_fields as shared_extract_condition_fields,
-    normalize_condition_field as shared_normalize_condition_field,
-)
-from .secret_config import decrypt_config_for_execution, redact_values, sensitive_fields
-
-logger = logging.getLogger(__name__)
+from .models import Workflow, WorkflowExecution
 
 
 class WorkflowExecutionUnavailable(ValueError):
     """Raised before an execution is created when a workflow cannot run."""
 
 
-def ensure_workflow_is_runnable(workflow: Workflow) -> None:
+def ensure_workflow_is_runnable(workflow: Workflow) -> tuple[int, int]:
     if not workflow.is_active:
         raise WorkflowExecutionUnavailable('Workflow must be active before execution.')
+    if workflow.execution_engine != 'prefect':
+        raise WorkflowExecutionUnavailable(
+            'Local execution is unavailable; publish the workflow to run it with Prefect.'
+        )
 
     from .publisher import load_current_published_manifest
 
     try:
-        load_current_published_manifest(workflow)
+        pointer, manifest = load_current_published_manifest(workflow)
     except FileNotFoundError as exc:
         raise WorkflowExecutionUnavailable(
             'Workflow must be published before execution.'
@@ -55,438 +32,30 @@ def ensure_workflow_is_runnable(workflow: Workflow) -> None:
         raise WorkflowExecutionUnavailable(
             'Published workflow manifest is unavailable or invalid; publish the workflow again.'
         ) from exc
-
-
-class WorkflowEngine:
-    """
-    Engine for executing workflows.
-
-    Deprecated: kept for backward compatibility only. The Prefect-based
-    execution path is the supported runtime moving forward.
-    """
-
-    def __init__(self, execution: WorkflowExecution):
-        self.execution = execution
-        self.workflow = execution.workflow
-        self.context = {
-            'trigger_data': execution.trigger_data,
-            'trigger_source': execution.trigger_source,
-            'variables': {},
-            'step_results': {},
-            'execution_id': str(execution.id),
-            'workflow_id': str(self.workflow.id),
-            'workflow_name': self.workflow.name,
-        }
-
-    def run(self) -> Dict[str, Any]:
-        """
-        Execute the workflow.
-
-        Returns:
-            Dict containing execution results
-        """
-        logger.info(f"Starting workflow execution: {self.execution.id}")
-
-        # Update execution status
-        self.execution.status = 'running'
-        self.execution.started_at = timezone.now()
-        steps = list(self.workflow.steps.filter(is_active=True).order_by('order'))
-        self.execution.total_steps = len(steps)
-        self.execution.save()
-
-        try:
-            for index, step in enumerate(steps):
-                self.execution.current_step = index
-                self.execution.save()
-
-                if step.node_type in ['start', 'end']:
-                    logger.info(f"Skipping {step.node_type} node: {step.name}")
-                    self._create_step_execution(step, 'skipped')
-                    continue
-
-                if step.node_type == 'condition':
-                    result = self._execute_condition_step(step)
-                    if not result.success:
-                        if step.on_failure == 'stop':
-                            raise Exception(f"Condition step '{step.name}' failed: {result.error}")
-
-                    self.context['step_results'][step.name] = result.data
-                    if result.data:
-                        self.context['variables'].update(result.data)
-
-                    self.execution.completed_steps = index + 1
-                    self.execution.update_progress()
-                    self.execution.context = self.context
-                    self.execution.save()
-                    continue
-
-                # Check if step should be executed based on condition
-                if not self._evaluate_condition(step):
-                    logger.info(f"Skipping step {step.name} - condition not met")
-                    self._create_step_execution(step, 'skipped')
-                    continue
-
-                # Execute the step
-                result = self._execute_step(step)
-
-                # Handle step result
-                if not result.success:
-                    if step.on_failure == 'stop':
-                        raise Exception(f"Step '{step.name}' failed: {result.error}")
-                    elif step.on_failure == 'retry':
-                        # Retry the step
-                        for attempt in range(step.retry_count):
-                            logger.info(f"Retrying step {step.name}, attempt {attempt + 2}")
-                            result = self._execute_step(step, attempt + 2)
-                            if result.success:
-                                break
-
-                        if not result.success and step.on_failure != 'continue':
-                            raise Exception(f"Step '{step.name}' failed after retries: {result.error}")
-
-                # Store step result in context
-                self.context['step_results'][step.name] = result.data
-                if result.data:
-                    self.context['variables'].update(result.data)
-
-                # Update progress
-                self.execution.completed_steps = index + 1
-                self.execution.update_progress()
-                self.execution.context = self.context
-                self.execution.save()
-
-            # Workflow completed successfully
-            self.execution.status = 'completed'
-            self.execution.completed_at = timezone.now()
-            self.execution.result_data = self.context
-            self.execution.save()
-
-            logger.info(f"Workflow execution completed: {self.execution.id}")
-
-        except Exception as e:
-            logger.exception(f"Workflow execution failed: {self.execution.id}")
-            self.execution.status = 'failed'
-            self.execution.completed_at = timezone.now()
-            self.execution.error_message = str(e)
-            self.execution.result_data = self.context
-            self.execution.save()
-            raise
-
-        return self.context
-
-    def _execute_step(self, step: WorkflowStep, attempt: int = 1) -> ActionResult:
-        """
-        Execute a single workflow step.
-
-        Args:
-            step: The workflow step to execute
-            attempt: Current attempt number (for retries)
-
-        Returns:
-            ActionResult from the action execution
-        """
-        logger.info(f"Executing step: {step.name} (attempt {attempt})")
-
-        # Create step execution record
-        step_exec = self._create_step_execution(step, 'running', attempt)
-        step_exec.input_data = self.context.copy()
-        step_exec.save()
-        secrets = []
-
-        try:
-            # Get the action handler
-            action = ActionRegistry.get_action(step.action_type)
-
-            # Merge default config with step config
-            config = {}
-            if step.action_template and step.action_template.default_config:
-                config.update(step.action_template.default_config)
-            config.update(step.action_config)
-
-            # Credentials remain encrypted in ORM and execution history. Only
-            # this short-lived copy is decrypted immediately before execution.
-            execution_config = decrypt_config_for_execution(step.action_type, config)
-            secrets = [
-                execution_config.get(field)
-                for field in sensitive_fields(step.action_type)
-            ]
-            result = action.execute(execution_config, self.context)
-            result.data = redact_values(result.data, secrets)
-            result.error = redact_values(result.error, secrets)
-            result.logs = redact_values(result.logs, secrets)
-
-            # Update step execution
-            step_exec.status = 'completed' if result.success else 'failed'
-            step_exec.completed_at = timezone.now()
-            step_exec.output_data = result.data
-            step_exec.logs = result.logs
-            if not result.success:
-                step_exec.error_message = result.error
-            step_exec.save()
-
-            return result
-
-        except Exception as e:
-            safe_error = redact_values(str(e), secrets)
-            logger.error("Step execution error for %s: %s", step.name, safe_error)
-            step_exec.status = 'failed'
-            step_exec.completed_at = timezone.now()
-            step_exec.error_message = safe_error
-            step_exec.error_traceback = redact_values(traceback.format_exc(), secrets)
-            step_exec.save()
-
-            return ActionResult(success=False, error=safe_error)
-
-    def _create_step_execution(
-        self,
-        step: WorkflowStep,
-        status: str,
-        attempt: int = 1
-    ) -> StepExecution:
-        """Create a step execution record."""
-        return StepExecution.objects.create(
-            workflow_execution=self.execution,
-            step=step,
-            status=status,
-            attempt_number=attempt,
-            started_at=timezone.now() if status == 'running' else None,
-        )
-
-    # Condition evaluation is delegated to the shared evaluator module to
-    # avoid semantic drift between this (deprecated) local engine and the
-    # Prefect ``condition_task``. See ``backend/workflows/condition_evaluator.py``.
-    _normalize_condition_field = staticmethod(shared_normalize_condition_field)
-
-    def _evaluate_condition_object(self, condition: Dict[str, Any], resolver) -> bool:
-        return shared_evaluate_condition_object(condition, resolver)
-
-    def _extract_condition_fields(self, condition: Dict[str, Any]) -> list[str]:
-        return shared_extract_condition_fields(condition)
-
-    def _execute_condition_step(self, step: WorkflowStep) -> ActionResult:
-        condition = step.condition or {}
-
-        step_exec = self._create_step_execution(step, 'running')
-        step_exec.input_data = self.context.copy()
-        step_exec.save()
-
-        try:
-            fields = self._extract_condition_fields(condition)
-            uses_ticket_scope = any(f.startswith('ticket.') for f in fields)
-            uses_alert_scope = any(f.startswith('alert.') for f in fields)
-
-            result_data: Dict[str, Any] = {}
-
-            if uses_ticket_scope:
-                from tickets.models import EventTicket
-
-                records = list(
-                    EventTicket.objects.filter(is_deleted=False).values(
-                        'ticket_number',
-                        'status',
-                        'priority',
-                        'title',
-                        'current_assign_group',
-                        'current_assign_owner',
-                        'event_category',
-                        'event_result',
-                    )
-                )
-
-                def resolver(path: str, record=None):
-                    target = record or {}
-                    normalized = self._normalize_condition_field(path)
-                    if normalized.startswith('ticket.'):
-                        key = normalized.split('.', 1)[1]
-                        mapping = {
-                            'ticket_number': 'ticket_number',
-                            'status': 'status',
-                            'priority': 'priority',
-                            'title': 'title',
-                            'assign_group': 'current_assign_group',
-                            'assign_owner': 'current_assign_owner',
-                            'event_category': 'event_category',
-                            'event_result': 'event_result',
-                        }
-                        return target.get(mapping.get(key, key))
-                    return None
-
-                matched_ticket_numbers = []
-                for rec in records:
-                    if self._evaluate_condition_object(condition, lambda path: resolver(path, rec)):
-                        matched_ticket_numbers.append(rec['ticket_number'])
-
-                result_data.update(
-                    {
-                        'target_ticket_numbers': matched_ticket_numbers,
-                        'matched_ticket_count': len(matched_ticket_numbers),
-                        'condition_matched': len(matched_ticket_numbers) > 0,
-                    }
-                )
-
-            elif uses_alert_scope:
-                from es_integration.models import Alert
-
-                records = list(
-                    Alert.objects.all().values(
-                        'alert_id',
-                        'severity',
-                        'title',
-                        'category',
-                        'source_index',
-                        'message',
-                        'rule_id',
-                    )
-                )
-
-                def resolver(path: str, record=None):
-                    target = record or {}
-                    normalized = self._normalize_condition_field(path)
-                    if normalized.startswith('alert.'):
-                        key = normalized.split('.', 1)[1]
-                        return target.get(key)
-                    return None
-
-                matched_alert_ids = []
-                for rec in records:
-                    if self._evaluate_condition_object(condition, lambda path: resolver(path, rec)):
-                        matched_alert_ids.append(rec['alert_id'])
-
-                result_data.update(
-                    {
-                        'target_alert_ids': matched_alert_ids,
-                        'matched_alert_count': len(matched_alert_ids),
-                        'condition_matched': len(matched_alert_ids) > 0,
-                    }
-                )
-
-            else:
-                def resolver(path: str):
-                    value = self.context
-                    for key in self._normalize_condition_field(path).split('.'):
-                        if isinstance(value, dict):
-                            value = value.get(key)
-                        else:
-                            value = None
-                            break
-                    return value
-
-                matched = self._evaluate_condition_object(condition, resolver)
-                result_data.update({'condition_matched': matched})
-
-            step_exec.status = 'completed'
-            step_exec.completed_at = timezone.now()
-            step_exec.output_data = result_data
-            step_exec.logs = f"Condition evaluated successfully ({step.name})"
-            step_exec.save()
-
-            return ActionResult(success=True, data=result_data, logs=step_exec.logs)
-
-        except Exception as e:
-            logger.exception(f"Condition step execution error: {step.name}")
-            step_exec.status = 'failed'
-            step_exec.completed_at = timezone.now()
-            step_exec.error_message = str(e)
-            step_exec.error_traceback = traceback.format_exc()
-            step_exec.save()
-            return ActionResult(success=False, error=str(e))
-
-    def _evaluate_condition(self, step: WorkflowStep) -> bool:
-        """
-        Evaluate step condition to determine if it should execute.
-
-        Args:
-            step: The workflow step with optional condition
-
-        Returns:
-            True if step should execute, False otherwise
-        """
-        if not step.condition:
-            return True
-
-        try:
-            condition = step.condition
-
-            if not condition or not isinstance(condition, dict):
-                return True
-
-            def resolver(path: str):
-                value = self.context
-                for key in self._normalize_condition_field(path).split('.'):
-                    if isinstance(value, dict):
-                        value = value.get(key)
-                    else:
-                        value = None
-                        break
-                return value
-
-            return self._evaluate_condition_object(condition, resolver)
-
-        except Exception as e:
-            logger.warning(f"Condition evaluation error: {e}")
-            return True
+    return int(pointer['current_version']), len(manifest['steps'])
 
 
 def execute_workflow(
     workflow: Workflow,
-    trigger_data: Optional[Dict] = None,
+    trigger_data: Optional[Dict[str, Any]] = None,
     trigger_source: str = 'manual',
-    executed_by=None
+    executed_by=None,
 ) -> WorkflowExecution:
-    """
-    Create a ``WorkflowExecution`` record and dispatch it to the configured
-    execution engine.
-
-    Two engines are supported:
-
-    - ``local`` (default): the existing Django 6.0 background-task path. With
-      the default ``ImmediateBackend`` the engine runs synchronously before
-      this function returns.
-    - ``prefect``: submits a flow run to the generic Prefect deployment via
-      ``prefect_dispatcher.submit``. The execution returns immediately while
-      Prefect runs the flow asynchronously; status is reconciled by
-      ``prefect_dispatcher.sync_status``.
-
-    If a workflow is marked ``prefect`` but Prefect is not configured (env
-    vars missing), we fall back to the local engine and record the reason in
-    ``error_message`` so the operator can spot the mis-config without losing
-    the run.
-
-    Args:
-        workflow: The ``Workflow`` instance to run.
-        trigger_data: Optional context dict forwarded to the engine.
-        trigger_source: Human-readable description of what caused execution
-            (e.g. ``"manual"``, ``"ticket:SEC-001"``).
-        executed_by: Optional Django ``User`` instance.
-
-    Returns:
-        The ``WorkflowExecution`` record (already persisted).
-    """
-    # A draft may have unpublished changes and is still runnable using its last
-    # published snapshot. The manifest itself, not is_draft, is authoritative.
-    ensure_workflow_is_runnable(workflow)
-
-    # Create the execution record in PENDING state only after preflight passes.
+    """Create an execution and submit its published snapshot to Prefect."""
+    workflow_version, total_steps = ensure_workflow_is_runnable(workflow)
     execution = WorkflowExecution.objects.create(
         workflow=workflow,
+        workflow_version=workflow_version,
         trigger_source=trigger_source,
         trigger_data=trigger_data or {},
         status='pending',
+        total_steps=total_steps,
         executed_by=executed_by,
     )
 
-    engine_choice = getattr(workflow, 'execution_engine', 'local') or 'local'
-
-    if engine_choice != 'prefect':
-        execution.status = 'failed'
-        execution.error_message = 'Local execution is disabled; use Prefect to run workflows.'
-        execution.completed_at = timezone.now()
-        execution.save(update_fields=['status', 'error_message', 'completed_at'])
-        return execution
-
     from . import prefect_client, prefect_dispatcher
 
-    deployment_id = getattr(workflow, 'prefect_deployment_id', '') or None
+    deployment_id = workflow.prefect_deployment_id or None
     if not prefect_client.is_configured(deployment_id):
         execution.status = 'failed'
         execution.error_message = 'Prefect not configured (PREFECT_API_URL / PREFECT_DEPLOYMENT_ID missing).'
