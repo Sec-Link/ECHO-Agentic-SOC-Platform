@@ -8,10 +8,33 @@ Defines the database models for SOAR workflow management:
 - StepExecution: Records of individual step executions
 - ActionTemplate: Reusable action templates
 """
+import secrets
 import uuid
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
+
+
+def _worker_credential_key():
+    return secrets.token_urlsafe(48)
+
+
+def _worker_secret_block_name():
+    return f'argus-worker-{uuid.uuid4().hex}'
+
+
+class WorkflowWorkerCredential(models.Model):
+    """Internal credential, never exposed through the user/token APIs."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    user = models.OneToOneField(User, on_delete=models.PROTECT, related_name='workflow_worker_credential')
+    key = models.CharField(max_length=64, default=_worker_credential_key, editable=False)
+    block_name = models.CharField(max_length=64, unique=True, default=_worker_secret_block_name, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(id=1), name='workflow_worker_credential_singleton'),
+        ]
 
 
 def _secure_action_config(instance, field_name, action_type):
@@ -553,6 +576,9 @@ class WorkflowExecution(models.Model):
         help_text="ID of the django.tasks TaskResult for this execution"
     )
 
+    runtime_event_at = models.DateTimeField(null=True, blank=True)
+    state_event_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -753,6 +779,13 @@ class WorkflowSchedule(models.Model):
         ('cron', 'Cron'),
         ('interval', 'Interval (seconds)'),
     ]
+class WorkflowEventCheckpoint(models.Model):
+    """Durable replay position for the Django Prefect event consumer."""
+
+    name = models.CharField(max_length=64, primary_key=True)
+    occurred = models.DateTimeField()
+
+
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workflow = models.ForeignKey(

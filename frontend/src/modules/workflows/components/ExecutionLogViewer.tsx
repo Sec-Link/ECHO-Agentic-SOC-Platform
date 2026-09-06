@@ -5,7 +5,7 @@
  * including step-by-step execution details, input/output data,
  * error messages, and execution logs.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Modal,
   Tabs,
@@ -38,7 +38,7 @@ import {
   FileTextOutlined,
   BugOutlined,
 } from '@ant-design/icons';
-import { getWorkflowExecution } from 'services/workflows';
+import { getWorkflowExecution, subscribeWorkflowProgress } from 'services/workflows';
 import type { WorkflowExecution, StepExecution } from 'services/workflows';
 
 const { Text, Paragraph } = Typography;
@@ -70,25 +70,34 @@ const ExecutionLogViewer: React.FC<ExecutionLogViewerProps> = ({
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
   const [searchText, setSearchText] = useState('');
   const [activeTab, setActiveTab] = useState('timeline');
+  const executionRequestId = useRef(0);
 
-  useEffect(() => {
-    if (visible && executionId) {
-      loadExecution();
-    }
-  }, [visible, executionId]);
-
-  const loadExecution = async () => {
+  const loadExecution = useCallback(async (silent = false) => {
     if (!executionId) return;
-    setLoading(true);
+    const requestId = ++executionRequestId.current;
+    if (!silent) setLoading(true);
     try {
       const data = await getWorkflowExecution(executionId);
-      setExecution(data);
+      if (requestId === executionRequestId.current) setExecution(data);
     } catch (err) {
-      message.error('Failed to load execution details');
+      if (!silent && requestId === executionRequestId.current) message.error('Failed to load execution details');
     } finally {
-      setLoading(false);
+      if (requestId === executionRequestId.current) setLoading(false);
     }
-  };
+  }, [executionId]);
+
+  useEffect(() => {
+    setExecution(null);
+    if (!visible || !executionId) return;
+    void loadExecution();
+    const unsubscribe = subscribeWorkflowProgress(progress => {
+      if (!progress || progress.execution_id === executionId) void loadExecution(true);
+    });
+    return () => {
+      executionRequestId.current += 1;
+      unsubscribe();
+    };
+  }, [visible, executionId, loadExecution]);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);

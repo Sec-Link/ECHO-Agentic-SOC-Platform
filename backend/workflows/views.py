@@ -9,12 +9,13 @@ import logging
 from typing import Any, Dict
 
 from django.db.models import Count, Q
+from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 
 from rest_framework import permissions, status, viewsets
-from rest_framework.authentication import TokenAuthentication
+from rest_framework.authentication import TokenAuthentication, get_authorization_header
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -48,7 +49,9 @@ from .serializers import (
 )
 from . import prefect_client
 from .parameter_binder import bind_workflow_parameters
+from .progress import EventStreamRenderer
 from .ticket_invocation import dispatch_ticket_event, find_callable_workflows, get_ticket_workplan, invoke_workflow_from_ticket
+from .worker_auth import IsWorkflowWorkerOrAdmin, WorkflowWorkerAuthentication
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,9 @@ class StaffTokenAuthentication(TokenAuthentication):
     """Keep internal endpoint authentication failures consistently at 403."""
 
     def authenticate_header(self, request):
+        header = get_authorization_header(request).split()
+        if header and header[0].lower() == b'workflowworker':
+            return 'WorkflowWorker'
         return None
 
 
@@ -450,6 +456,15 @@ class WorkflowExecutionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = WorkflowExecution.objects.all()
     permission_classes = [permissions.IsAuthenticated]
 
+    @action(detail=False, methods=['get'], renderer_classes=[EventStreamRenderer])
+    def events(self, request):
+        from .progress import stream_progress
+
+        response = StreamingHttpResponse(stream_progress(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache, no-transform'
+        response['X-Accel-Buffering'] = 'no'
+        return response
+
     def get_serializer_class(self):
         if self.action == 'list':
             return WorkflowExecutionListSerializer
@@ -506,8 +521,8 @@ class WorkflowExecutionViewSet(viewsets.ReadOnlyModelViewSet):
         detail=False,
         methods=['get'],
         url_path='runtime-policy',
-        authentication_classes=[StaffTokenAuthentication],
-        permission_classes=[permissions.IsAdminUser],
+        authentication_classes=[StaffTokenAuthentication, WorkflowWorkerAuthentication],
+        permission_classes=[IsWorkflowWorkerOrAdmin],
     )
     def runtime_policy(self, request):
         from accounts.models import SystemSettings
@@ -533,28 +548,6 @@ class WorkflowExecutionViewSet(viewsets.ReadOnlyModelViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         return Response(WorkflowExecutionDetailSerializer(execution).data)
-
-    def retrieve(self, request, *args, **kwargs):
-        # Opportunistically reconcile non-terminal Prefect-backed executions
-        # with the upstream flow run before serializing. Failures are
-        # swallowed so a Prefect outage never breaks the detail page.
-        execution = self.get_object()
-        if (
-            execution.workflow.execution_engine == 'prefect'
-            and (
-                execution.status not in {'completed', 'failed', 'cancelled'}
-                or (execution.status == 'failed' and not execution.error_message)
-            )
-            and execution.task_result_id
-        ):
-            try:
-                from . import prefect_dispatcher
-                prefect_dispatcher.sync_status(execution)
-                execution.refresh_from_db()
-            except Exception:  # pragma: no cover - defensive
-                pass
-        serializer = self.get_serializer(execution)
-        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

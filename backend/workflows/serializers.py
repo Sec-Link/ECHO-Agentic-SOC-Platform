@@ -585,6 +585,8 @@ class RuntimeStepResultSerializer(serializers.Serializer):
     output_data = serializers.JSONField(required=False, default=dict)
     error_message = serializers.CharField(required=False, allow_blank=True, default='')
     logs = serializers.CharField(required=False, allow_blank=True, default='')
+    started_at = serializers.DateTimeField(required=False, allow_null=True)
+    completed_at = serializers.DateTimeField(required=False, allow_null=True)
 
 
 class RuntimeSnapshotSerializer(serializers.Serializer):

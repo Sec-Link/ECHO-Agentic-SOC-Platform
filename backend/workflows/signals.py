@@ -12,6 +12,13 @@ from .condition_evaluator import evaluate_condition_object
 logger = logging.getLogger(__name__)
 
 
+@receiver(post_save, sender='workflows.WorkflowExecution')
+def on_execution_progress(sender, instance, **kwargs):
+    from .progress import publish_progress
+
+    publish_progress(instance)
+
+
 def _get_nested_value(data: dict, field: str):
     current = data
     for part in str(field).split('.'):

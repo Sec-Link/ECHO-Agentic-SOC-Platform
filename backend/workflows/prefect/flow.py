@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+from uuid import NAMESPACE_URL, uuid5
 
 from prefect import flow, get_run_logger, task
+from prefect.events import emit_event
 from prefect.runtime import flow_run
 
 from .actions import ActionRegistry
-from .client import BackendAPIError, get_runtime_policy, register_runtime, sync_runtime
+from .client import BackendAPIError, get_runtime_policy
 from .conditions import evaluate_condition_object, resolve_context_path
 from .executor import execute_action
 
@@ -48,33 +52,14 @@ def _next_step(ordered: List[Dict[str, Any]], positions: Dict[str, int], step: D
     return str(ordered[index + 1].get("id")) if index is not None and index + 1 < len(ordered) else None
 
 
-def _snapshot(execution_id: str, prefect_id: str, status: str, current_step: int, total_steps: int, context: Dict[str, Any], results: List[Dict[str, Any]], error: str = "") -> None:
-    sync_runtime(execution_id, {
-        "prefect_flow_run_id": prefect_id,
-        "status": status,
-        "current_step": current_step,
-        "total_steps": total_steps,
-        "context": {key: value for key, value in context.items() if not key.startswith("_")},
-        "error_message": error,
-        "step_results": results,
-    })
-
-
 @flow(name="soar-generic")
-def run_soar_workflow(run: Dict[str, Any]) -> Dict[str, Any]:
+def run_soar_workflow(run: Dict[str, Any], worker_credential_block: str = '') -> Dict[str, Any]:
+    # The non-secret deployment default is read lazily by the HTTP client from
+    # flow_run.parameters, so credentials never enter task inputs or snapshots.
     workflow, definition, trigger = _validated_run(run)
     prefect_id = str(flow_run.id)
     steps = list(definition.get("steps") or [])
-    execution_id = str(run.get("execution_id") or "")
-    if not execution_id:
-        execution_id = register_runtime({
-            "workflow_id": str(workflow["id"]),
-            "workflow_version": int(workflow.get("version") or 1),
-            "prefect_flow_run_id": prefect_id,
-            "trigger_source": str(trigger.get("source") or "schedule"),
-            "trigger_data": trigger.get("data") or {},
-            "total_steps": len(steps),
-        })
+    execution_id = str(run.get("execution_id") or uuid5(NAMESPACE_URL, f"argus:prefect:{prefect_id}"))
     logger = get_run_logger()
     logger.info("Running SOAR workflow %s (execution %s)", definition.get("name"), execution_id)
     context: Dict[str, Any] = {
@@ -106,9 +91,48 @@ def run_soar_workflow(run: Dict[str, Any]) -> Dict[str, Any]:
                 "Workflow HTTP runtime policy could not be loaded; all API targets will be denied for this execution."
             )
     results: List[Dict[str, Any]] = []
-    _snapshot(execution_id, prefect_id, "running", 0, len(steps), context, results)
+    sequence = 0
+    previous_event = None
+    last_occurred = None
+
+    def snapshot(status: str, current_step: int, error: str = "") -> None:
+        nonlocal sequence, previous_event, last_occurred
+        sequence += 1
+        occurred = datetime.now(timezone.utc)
+        if last_occurred is not None and occurred <= last_occurred:
+            occurred = last_occurred + timedelta(microseconds=1)
+        last_occurred = occurred
+        previous_event = emit_event(
+            event="argus.workflow.progress",
+            occurred=occurred,
+            resource={"prefect.resource.id": f"argus.workflow.execution.{execution_id}"},
+            related=[{
+                "prefect.resource.id": f"prefect.flow-run.{prefect_id}",
+                "prefect.resource.role": "flow-run",
+            }],
+            follows=previous_event,
+            payload=deepcopy({
+                "execution_id": execution_id,
+                "workflow_id": str(workflow["id"]),
+                "workflow_version": int(workflow.get("version") or 1),
+                "trigger_source": str(trigger.get("source") or "manual"),
+                "trigger_data": trigger.get("data") or {},
+                "sequence": sequence,
+                "prefect_flow_run_id": prefect_id,
+                "status": status,
+                "current_step": current_step,
+                "total_steps": len(steps),
+                "context": {key: value for key, value in context.items() if not key.startswith("_")},
+                "error_message": error,
+                "step_results": results,
+            }),
+        )
+        if previous_event is None:
+            logger.warning("Workflow progress event %s could not be queued for Prefect.", sequence)
+
+    snapshot("running", 0)
     if not steps:
-        _snapshot(execution_id, prefect_id, "completed", 0, 0, context, results)
+        snapshot("completed", 0)
         return {"execution_id": execution_id, "status": "completed", "step_results": results}
 
     by_id = {str(item["id"]): item for item in steps if isinstance(item, dict) and item.get("id")}
@@ -119,7 +143,7 @@ def run_soar_workflow(run: Dict[str, Any]) -> Dict[str, Any]:
     limit, iterations = max(len(ordered) * 5, 1), 0
 
     def finish_failed(error: str) -> None:
-        _snapshot(execution_id, prefect_id, "failed", iterations, len(steps), context, results, error)
+        snapshot("failed", iterations, error)
         raise RuntimeError(error)
 
     while current:
@@ -129,6 +153,14 @@ def run_soar_workflow(run: Dict[str, Any]) -> Dict[str, Any]:
         step = by_id.get(current)
         if not step:
             finish_failed(f"Workflow references missing step: {current}")
+        started_at = datetime.now(timezone.utc).isoformat()
+        results.append({
+            "step_id": step["id"], "status": "running", "attempt_number": 1,
+            "input_data": step.get("condition") or step.get("action_config") or {},
+            "output_data": {}, "error_message": "", "logs": "",
+            "started_at": started_at, "completed_at": None,
+        })
+        snapshot("running", iterations)
         node_type = step.get("node_type")
         condition_result: bool | None = None
         if node_type in {"start", "end"}:
@@ -160,19 +192,20 @@ def run_soar_workflow(run: Dict[str, Any]) -> Dict[str, Any]:
             output = action_result.get("data") or {}
             result = {"step_id": step["id"], "status": "completed" if success else "failed", "attempt_number": 1, "input_data": step.get("action_config") or {}, "output_data": output, "error_message": action_result.get("error", ""), "logs": action_result.get("logs", "")}
 
-        results.append(result)
+        result.update(started_at=started_at, completed_at=datetime.now(timezone.utc).isoformat())
+        results[-1] = result
         success = result["status"] != "failed"
         output = result.get("output_data") or {}
         context["step_results"][str(step["id"])] = output
         if isinstance(output, dict):
             context["variables"].update(output)
         context["previous_step"] = {"step_id": str(step["id"]), "success": success, "output": output}
-        _snapshot(execution_id, prefect_id, "running", iterations, len(steps), context, results)
+        snapshot("running", iterations)
         if not success and step.get("on_failure") == "stop":
             finish_failed(result.get("error_message") or f"Step '{step.get('name')}' failed.")
         if node_type == "end":
             break
         current = _next_step(ordered, positions, step, condition_result)
 
-    _snapshot(execution_id, prefect_id, "completed", iterations, len(steps), context, results)
+    snapshot("completed", iterations)
     return {"execution_id": execution_id, "status": "completed", "step_results": results}

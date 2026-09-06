@@ -34,6 +34,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import {
   listWorkflows,
+  subscribeWorkflowProgress,
   deleteWorkflow,
   executeWorkflow,
   cloneWorkflow,
@@ -137,14 +138,6 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
   const workflowRequestInFlight = useRef<Promise<Workflow[]> | null>(null);
 
   const fetchWorkflows = useCallback(async (silent = false) => {
-    if (silent && workflowRequestInFlight.current) {
-      try {
-        await workflowRequestInFlight.current;
-      } catch {
-        // Retry on the next polling interval.
-      }
-      return;
-    }
     const requestId = ++workflowRequestId.current;
     if (!silent) setLoading(true);
     const previousRequest = workflowRequestInFlight.current;
@@ -209,21 +202,10 @@ const Workflows: React.FC<WorkflowsProps> = ({ onNavigate, onVisualEditWorkflow 
     };
   }, [fetchWorkflows, fetchStats, fetchBindings]);
 
-  const hasRunningWorkflow = workflows.some(isWorkflowRunning);
-  useEffect(() => {
-    if (!hasRunningWorkflow) return;
-    let cancelled = false;
-    let timeout: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      await fetchWorkflows(true);
-      if (!cancelled) timeout = setTimeout(poll, 5000);
-    };
-    timeout = setTimeout(poll, 5000);
-    return () => {
-      cancelled = true;
-      clearTimeout(timeout);
-    };
-  }, [hasRunningWorkflow, fetchWorkflows]);
+  useEffect(() => subscribeWorkflowProgress(() => {
+    void fetchWorkflows(true);
+    void fetchStats();
+  }), [fetchWorkflows, fetchStats]);
 
   const getWorkflowBindings = useCallback((workflowId: string) => (
     bindings.filter((item) => item.workflow === workflowId)

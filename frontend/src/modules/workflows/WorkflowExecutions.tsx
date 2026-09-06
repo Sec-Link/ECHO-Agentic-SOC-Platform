@@ -32,6 +32,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import {
   listWorkflowExecutions,
+  subscribeWorkflowProgress,
   getWorkflowExecution,
   cancelWorkflowExecution,
   listWorkflows,
@@ -71,16 +72,10 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
   const [logViewerExecutionId, setLogViewerExecutionId] = useState<string | null>(null);
   const executionRequestId = useRef(0);
   const executionRequestInFlight = useRef<Promise<WorkflowExecution[]> | null>(null);
+  const detailRequestId = useRef(0);
+  const detailExecutionId = useRef<string | null>(null);
 
   const fetchExecutions = useCallback(async (silent = false) => {
-    if (silent && executionRequestInFlight.current) {
-      try {
-        await executionRequestInFlight.current;
-      } catch {
-        // Retry on the next polling interval.
-      }
-      return;
-    }
     const requestId = ++executionRequestId.current;
     if (!silent) setLoading(true);
     const previousRequest = executionRequestInFlight.current;
@@ -139,35 +134,32 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
     fetchWorkflows();
   }, [fetchWorkflows]);
 
-  const hasRunningExecution = executions.some(
-    execution => ['pending', 'running', 'paused'].includes(execution.status),
-  );
-  useEffect(() => {
-    if (!hasRunningExecution) return;
-    let cancelled = false;
-    let timeout: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      await fetchExecutions(true);
-      if (!cancelled) timeout = setTimeout(poll, 5000);
-    };
-    timeout = setTimeout(poll, 5000);
-    return () => {
-      cancelled = true;
-      clearTimeout(timeout);
-    };
-  }, [hasRunningExecution, fetchExecutions]);
-
-  const loadExecutionDetail = async (id: string) => {
-    setDetailLoading(true);
+  const loadExecutionDetail = useCallback(async (id: string, silent = false) => {
+    if (silent && detailExecutionId.current !== id) return;
+    detailExecutionId.current = id;
+    const requestId = ++detailRequestId.current;
+    if (!silent) setDetailLoading(true);
     try {
       const data = await getWorkflowExecution(id);
-      setSelectedExecution(data);
+      if (requestId === detailRequestId.current) setSelectedExecution(data);
     } catch (err) {
-      message.error('Failed to load execution details');
+      if (!silent && requestId === detailRequestId.current) message.error('Failed to load execution details');
     } finally {
-      setDetailLoading(false);
+      if (requestId === detailRequestId.current) setDetailLoading(false);
     }
-  };
+  }, []);
+
+  const selectedExecutionId = selectedExecution?.id;
+  useEffect(() => subscribeWorkflowProgress(progress => {
+    if (!progress || !filterWorkflow || progress.workflow_id === filterWorkflow) {
+      void fetchExecutions(true);
+    }
+    if (selectedExecutionId && (!progress || progress.execution_id === selectedExecutionId)) {
+      void loadExecutionDetail(selectedExecutionId, true);
+    }
+  }), [fetchExecutions, filterWorkflow, selectedExecutionId, loadExecutionDetail]);
+
+  useEffect(() => () => { detailRequestId.current += 1; }, []);
 
   const handleCancel = async (id: string) => {
     try {
@@ -360,7 +352,11 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
                   >
                     Full Logs
                   </Button>
-                  <Button size="small" onClick={() => setSelectedExecution(null)}>
+                  <Button size="small" onClick={() => {
+                    detailRequestId.current += 1;
+                    detailExecutionId.current = null;
+                    setSelectedExecution(null);
+                  }}>
                     Close
                   </Button>
                 </Space>

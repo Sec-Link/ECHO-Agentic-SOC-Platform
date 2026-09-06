@@ -5,6 +5,7 @@ API routes for the workflows app.
 """
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
+from .worker_views import WorkerTicketViewSet
 
 from .views import (
     ActionTemplateViewSet,
@@ -39,6 +40,11 @@ router.register(r'ticket-workflow-bindings', TicketWorkflowBindingViewSet, basen
 
 # API URL patterns
 urlpatterns = [
+    path('worker/tickets/', WorkerTicketViewSet.as_view({'get': 'list', 'post': 'create'}),
+         name='workflow-worker-ticket-list'),
+    path('worker/tickets/<str:ticket_number>/',
+         WorkerTicketViewSet.as_view({'get': 'retrieve', 'patch': 'partial_update'}),
+         name='workflow-worker-ticket-detail'),
     path('', include(router.urls)),
     path('stats/', WorkflowStatsView.as_view(), name='workflow-stats'),
     path('prefect/deployments/', PrefectDeploymentListView.as_view(), name='prefect-deployments'),

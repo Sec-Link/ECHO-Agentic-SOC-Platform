@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from . import prefect_client
 from .models import StepExecution, Workflow, WorkflowExecution, WorkflowSchedule
@@ -46,6 +47,10 @@ def build_run_envelope(
             'data': trigger_data or {},
         },
     }
+    if any(step.get('action_type') in {'create_ticket', 'update_ticket', 'api_call'} for step in definition['steps']):
+        from .worker_credentials import sync_worker_credential
+
+        run['worker_credential_block'] = sync_worker_credential()
     return run, pointer, definition
 
 
@@ -67,22 +72,29 @@ def submit(execution: WorkflowExecution) -> WorkflowExecution:
         )
     except (OSError, ValueError, TypeError, KeyError, prefect_client.PrefectAPIError) as exc:
         logger.exception('Failed to dispatch workflow execution %s', execution.id)
-        execution.status = 'failed'
-        execution.error_message = f'Prefect dispatch failed: {exc}'
-        execution.completed_at = timezone.now()
-        execution.save(update_fields=['status', 'error_message', 'completed_at'])
+        with transaction.atomic():
+            execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+            if execution.status == 'pending' and not execution.task_result_id and not execution.runtime_event_at:
+                execution.status = 'failed'
+                execution.error_message = f'Prefect dispatch failed: {exc}'
+                execution.completed_at = timezone.now()
+                execution.save(update_fields=['status', 'error_message', 'completed_at'])
         return execution
 
-    execution.task_result_id = str(result.get('id') or '')
-    state = result.get('state') or {}
-    execution.status = prefect_client.map_state_to_status(state.get('type') or result.get('state_type'))
-    execution.total_steps = len(definition.get('steps') or [])
-    execution.context = {
-        **(execution.context or {}),
-        'workflow_version': execution.workflow_version,
-        'published_at': pointer.get('published_at'),
-    }
-    execution.save(update_fields=['task_result_id', 'status', 'total_steps', 'context'])
+    # A fast worker may already have sent progress while create_flow_run returned.
+    with transaction.atomic():
+        execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+        execution.task_result_id = str(result.get('id') or '')
+        state = result.get('state') or {}
+        if not execution.runtime_event_at and execution.status == 'pending':
+            execution.status = prefect_client.map_state_to_status(state.get('type') or result.get('state_type'))
+        execution.total_steps = len(definition.get('steps') or [])
+        execution.context = {
+            **(execution.context or {}),
+            'workflow_version': execution.workflow_version,
+            'published_at': pointer.get('published_at'),
+        }
+        execution.save(update_fields=['task_result_id', 'status', 'total_steps', 'context'])
     return execution
 
 
@@ -92,29 +104,38 @@ def cancel(execution: WorkflowExecution) -> WorkflowExecution:
     return execution
 
 
-def sync_status(execution: WorkflowExecution) -> WorkflowExecution:
-    if not execution.task_result_id or (
-        execution.status in prefect_client.TERMINAL_STATUSES
+@transaction.atomic
+def sync_status(execution: WorkflowExecution, *, force=False, occurred=None) -> WorkflowExecution:
+    execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+    if not execution.task_result_id or execution.status == 'cancelled' or (
+        not force and execution.status in prefect_client.TERMINAL_STATUSES
         and not (execution.status == 'failed' and not execution.error_message)
     ):
         return execution
-    try:
-        flow_run = prefect_client.get_flow_run(execution.task_result_id)
-    except prefect_client.PrefectAPIError as exc:
-        logger.warning('Prefect sync failed for execution %s: %s', execution.id, exc)
-        return execution
+    # Let callers retry transport failures; a consumer must not checkpoint a
+    # native terminal event whose current state could not be read.
+    flow_run = prefect_client.get_flow_run(execution.task_result_id)
+    fields = ['status', 'started_at', 'completed_at', 'error_message', 'state_event_at']
+    before = [getattr(execution, field) for field in fields]
     state = flow_run.get('state') or {}
     status = prefect_client.map_state_to_status(state.get('type') or flow_run.get('state_type'))
+    state_time = (parse_datetime(state['timestamp']) if state.get('timestamp') else None) or occurred or timezone.now()
+    execution.state_event_at = state_time
     execution.status = status
     if status == 'running' and not execution.started_at:
         execution.started_at = timezone.now()
-    if status in prefect_client.TERMINAL_STATUSES and not execution.completed_at:
-        execution.completed_at = timezone.now()
+    if status in prefect_client.TERMINAL_STATUSES:
+        execution.completed_at = state_time
+    if status not in prefect_client.TERMINAL_STATUSES:
+        execution.completed_at = None
+    if status != 'failed':
+        execution.error_message = ''
     if status == 'failed' and not execution.error_message:
         execution.error_message = str(
             state.get('message') or flow_run.get('state_name') or 'Prefect flow run failed.'
         )
-    execution.save(update_fields=['status', 'started_at', 'completed_at', 'error_message'])
+    if before != [getattr(execution, field) for field in fields]:
+        execution.save(update_fields=fields)
     return execution
 
 
@@ -142,6 +163,7 @@ def register_runtime_execution(payload: Dict[str, Any]) -> WorkflowExecution:
     try:
         with transaction.atomic():
             return WorkflowExecution.objects.create(
+                **({'id': payload['execution_id']} if payload.get('execution_id') else {}),
                 workflow=workflow,
                 workflow_version=workflow_version,
                 trigger_source=str(payload.get('trigger_source') or 'schedule'),
@@ -164,7 +186,7 @@ def register_runtime_execution(payload: Dict[str, Any]) -> WorkflowExecution:
 
 
 @transaction.atomic
-def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]) -> WorkflowExecution:
+def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any], *, occurred=None) -> WorkflowExecution:
     from .publisher import load_published_manifest
 
     execution = WorkflowExecution.objects.select_for_update().select_related('workflow').get(pk=execution.pk)
@@ -173,6 +195,8 @@ def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]
         raise ValueError('prefect_flow_run_id does not match this execution')
     if not execution.task_result_id:
         execution.task_result_id = flow_run_id
+    if occurred and execution.runtime_event_at and occurred <= execution.runtime_event_at:
+        return execution
 
     incoming_status = str(payload['status'])
     if execution.status == 'cancelled' and incoming_status != 'cancelled':
@@ -202,6 +226,8 @@ def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]
             )
         status = str(item.get('status') or 'completed')
         now = timezone.now()
+        started_at = parse_datetime(item['started_at']) if item.get('started_at') else None
+        completed_at = parse_datetime(item['completed_at']) if item.get('completed_at') else None
         step_execution, created = StepExecution.objects.get_or_create(
             workflow_execution=execution,
             source_step_id=step_id,
@@ -211,8 +237,8 @@ def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]
                 'action_type': manifest_step['action_type'],
                 'status': status,
                 'attempt_number': max(int(item.get('attempt_number') or 1), 1),
-                'started_at': now,
-                'completed_at': now if status in terminal_step_statuses else None,
+                'started_at': started_at or occurred or now,
+                'completed_at': (completed_at or occurred or now) if status in terminal_step_statuses else None,
                 'input_data': item.get('input_data') or {},
                 'output_data': item.get('output_data') or {},
                 'error_message': item.get('error_message') or '',
@@ -220,21 +246,28 @@ def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]
             },
         )
         if not created:
-            step_execution.status = status
-            step_execution.attempt_number = max(int(item.get('attempt_number') or 1), 1)
-            step_execution.started_at = step_execution.started_at or now
-            step_execution.completed_at = now if status in terminal_step_statuses else None
-            step_execution.input_data = item.get('input_data') or {}
-            step_execution.output_data = item.get('output_data') or {}
-            step_execution.error_message = item.get('error_message') or ''
-            step_execution.logs = item.get('logs') or ''
-            step_execution.save(update_fields=[
-                'status', 'attempt_number', 'started_at', 'completed_at',
-                'input_data', 'output_data', 'error_message', 'logs', 'updated_at',
-            ])
+            values = {
+                'status': status,
+                'attempt_number': max(int(item.get('attempt_number') or 1), 1),
+                'started_at': started_at or step_execution.started_at or occurred or now,
+                'completed_at': (completed_at or step_execution.completed_at or occurred or now) if status in terminal_step_statuses else None,
+                'input_data': item.get('input_data') or {},
+                'output_data': item.get('output_data') or {},
+                'error_message': item.get('error_message') or '',
+                'logs': item.get('logs') or '',
+            }
+            changed = [key for key, value in values.items() if getattr(step_execution, key) != value]
+            if changed:
+                for key in changed:
+                    setattr(step_execution, key, values[key])
+                step_execution.save(update_fields=[*changed, 'updated_at'])
 
-    execution.status = incoming_status
-    execution.started_at = execution.started_at or timezone.now()
+    # Native state and custom snapshots can arrive in either order. Preserve a
+    # newer native state while still accepting delayed detailed step results.
+    newer_native_state = occurred and execution.state_event_at and occurred <= execution.state_event_at
+    if not newer_native_state:
+        execution.status = incoming_status
+    execution.started_at = execution.started_at or occurred or timezone.now()
     execution.current_step = max(int(payload.get('current_step') or 0), 0)
     execution.total_steps = len(definition['steps'])
     execution.completed_steps = execution.step_executions.filter(status__in=terminal_step_statuses).count()
@@ -243,17 +276,20 @@ def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any]
         **(payload.get('context') or {}),
         'workflow_version': execution.workflow_version,
     }
-    execution.error_message = payload.get('error_message') or ''
+    execution.error_message = payload.get('error_message') or (execution.error_message if execution.status == 'failed' else '')
     if incoming_status in prefect_client.TERMINAL_STATUSES:
-        execution.completed_at = timezone.now()
+        if not newer_native_state:
+            execution.completed_at = occurred or execution.completed_at or timezone.now()
         execution.result_data = {
             'execution_id': str(execution.id),
-            'status': incoming_status,
+            'status': execution.status,
             'step_results': step_results,
         }
         if incoming_status == 'completed':
             execution.completed_steps = execution.total_steps
             execution.update_progress()
+    if occurred:
+        execution.runtime_event_at = occurred
     execution.save()
     return execution
 

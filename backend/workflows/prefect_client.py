@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import os
+from base64 import b64encode
+from urllib.parse import parse_qs, urlsplit
 from typing import Any, Dict, Optional
 
 import requests
@@ -51,6 +53,14 @@ class PrefectConfigError(RuntimeError):
 
 class PrefectAPIError(RuntimeError):
     """Raised when Prefect API returns a non-2xx response."""
+
+
+class PrefectFlowRunNotFound(PrefectAPIError):
+    """A retained event can outlive its deleted flow run."""
+
+
+class PrefectDeploymentNotFound(PrefectAPIError):
+    """A local workflow can reference a deployment removed from Prefect."""
 
 
 def _api_base() -> str:
@@ -86,6 +96,8 @@ def _headers() -> Dict[str, str]:
     api_key = os.getenv('PREFECT_API_KEY', '').strip()
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
+    elif auth_string := os.getenv('PREFECT_API_AUTH_STRING', '').strip():
+        headers['Authorization'] = 'Basic ' + b64encode(auth_string.encode()).decode()
     return headers
 
 
@@ -170,8 +182,24 @@ def get_flow_run(flow_run_id: str) -> Dict[str, Any]:
         allowed_statuses=(404,),
     )
     if resp.status_code == 404:
-        raise PrefectAPIError(f'Flow run {flow_run_id} not found on Prefect.')
+        raise PrefectFlowRunNotFound(f'Flow run {flow_run_id} not found on Prefect.')
     return resp.json()
+
+
+def iter_events(event_filter: Dict[str, Any]):
+    """Page through retained events without trusting a server-supplied host."""
+    page = _request('post', '/events/filter', operation='read events',
+                    json={'filter': event_filter}).json()
+    while True:
+        yield from page.get('events', [])
+        next_page = page.get('next_page')
+        if not next_page:
+            return
+        token = parse_qs(urlsplit(next_page).query).get('page-token')
+        if not token:
+            raise PrefectAPIError('Prefect event page is missing its continuation token.')
+        page = _request('get', '/events/filter/next', operation='read next events',
+                        params={'page-token': token[0]}).json()
 
 
 def cancel_flow_run(flow_run_id: str) -> None:
@@ -315,7 +343,7 @@ def get_deployment(deployment_id: str) -> Dict[str, Any]:
         allowed_statuses=(404,),
     )
     if resp.status_code == 404:
-        raise PrefectAPIError(f'Deployment {deployment_id} not found on Prefect.')
+        raise PrefectDeploymentNotFound(f'Deployment {deployment_id} not found on Prefect.')
     return resp.json()
 
 
