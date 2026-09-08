@@ -140,6 +140,8 @@ TASKS = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Compress large JSON responses such as the detection-rule catalog.
+    'django.middleware.gzip.GZipMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.common.CommonMiddleware',
