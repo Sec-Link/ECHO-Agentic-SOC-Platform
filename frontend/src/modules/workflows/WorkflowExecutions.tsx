@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Card,
   Table,
@@ -32,9 +32,9 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import {
   listWorkflowExecutions,
+  subscribeWorkflowProgress,
   getWorkflowExecution,
   cancelWorkflowExecution,
-  refreshPrefectExecutionStatus,
   listWorkflows,
   WorkflowExecution,
   StepExecution,
@@ -70,19 +70,47 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
   const [filterStatus, setFilterStatus] = useState<string>('');
   const [logViewerVisible, setLogViewerVisible] = useState(false);
   const [logViewerExecutionId, setLogViewerExecutionId] = useState<string | null>(null);
+  const executionRequestId = useRef(0);
+  const executionRequestInFlight = useRef<Promise<WorkflowExecution[]> | null>(null);
+  const detailRequestId = useRef(0);
+  const detailExecutionId = useRef<string | null>(null);
 
-  const fetchExecutions = useCallback(async () => {
-    setLoading(true);
+  const fetchExecutions = useCallback(async (silent = false) => {
+    const requestId = ++executionRequestId.current;
+    if (!silent) setLoading(true);
+    const previousRequest = executionRequestInFlight.current;
+    if (previousRequest) {
+      try {
+        await previousRequest;
+      } catch {
+        // The latest queued request still needs a chance to refresh the list.
+      }
+    }
+    if (requestId !== executionRequestId.current) return;
+
     try {
       const params: any = {};
       if (filterWorkflow) params.workflow = filterWorkflow;
       if (filterStatus) params.status = filterStatus;
-      const data = await listWorkflowExecutions(params);
-      setExecutions(Array.isArray(data) ? data : []);
+      const request = listWorkflowExecutions(params);
+      executionRequestInFlight.current = request;
+      const data = await request;
+      if (requestId !== executionRequestId.current) return;
+      const items = Array.isArray(data) ? data : [];
+      setExecutions(items);
+      setSelectedExecution(current => {
+        const updated = current && items.find(item => item.id === current.id);
+        return updated ? { ...current, ...updated } : current;
+      });
     } catch (err) {
-      message.error('Failed to load executions');
+      if (!silent && requestId === executionRequestId.current) {
+        message.error('Failed to load executions');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === executionRequestId.current) {
+        executionRequestInFlight.current = null;
+      }
+      if (requestId === executionRequestId.current) setLoading(false);
     }
   }, [filterWorkflow, filterStatus]);
 
@@ -97,29 +125,41 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
 
   useEffect(() => {
     fetchExecutions();
-    fetchWorkflows();
-  }, [fetchExecutions, fetchWorkflows]);
+    return () => {
+      executionRequestId.current += 1;
+    };
+  }, [fetchExecutions]);
 
-  // Auto-refresh for running executions
   useEffect(() => {
-    const hasRunning = executions.some(e => e.status === 'running' || e.status === 'pending');
-    if (!hasRunning) return;
+    fetchWorkflows();
+  }, [fetchWorkflows]);
 
-    const interval = setInterval(fetchExecutions, 5000);
-    return () => clearInterval(interval);
-  }, [executions, fetchExecutions]);
-
-  const loadExecutionDetail = async (id: string) => {
-    setDetailLoading(true);
+  const loadExecutionDetail = useCallback(async (id: string, silent = false) => {
+    if (silent && detailExecutionId.current !== id) return;
+    detailExecutionId.current = id;
+    const requestId = ++detailRequestId.current;
+    if (!silent) setDetailLoading(true);
     try {
       const data = await getWorkflowExecution(id);
-      setSelectedExecution(data);
+      if (requestId === detailRequestId.current) setSelectedExecution(data);
     } catch (err) {
-      message.error('Failed to load execution details');
+      if (!silent && requestId === detailRequestId.current) message.error('Failed to load execution details');
     } finally {
-      setDetailLoading(false);
+      if (requestId === detailRequestId.current) setDetailLoading(false);
     }
-  };
+  }, []);
+
+  const selectedExecutionId = selectedExecution?.id;
+  useEffect(() => subscribeWorkflowProgress(progress => {
+    if (!progress || !filterWorkflow || progress.workflow_id === filterWorkflow) {
+      void fetchExecutions(true);
+    }
+    if (selectedExecutionId && (!progress || progress.execution_id === selectedExecutionId)) {
+      void loadExecutionDetail(selectedExecutionId, true);
+    }
+  }), [fetchExecutions, filterWorkflow, selectedExecutionId, loadExecutionDetail]);
+
+  useEffect(() => () => { detailRequestId.current += 1; }, []);
 
   const handleCancel = async (id: string) => {
     try {
@@ -267,7 +307,7 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
                 <Select.Option value="failed">Failed</Select.Option>
                 <Select.Option value="cancelled">Cancelled</Select.Option>
               </Select>
-              <Button icon={<ReloadOutlined />} onClick={fetchExecutions}>
+              <Button icon={<ReloadOutlined />} onClick={() => fetchExecutions()}>
                 Refresh
               </Button>
             </Space>
@@ -312,7 +352,11 @@ const WorkflowExecutions: React.FC<WorkflowExecutionsProps> = ({ workflowId, onB
                   >
                     Full Logs
                   </Button>
-                  <Button size="small" onClick={() => setSelectedExecution(null)}>
+                  <Button size="small" onClick={() => {
+                    detailRequestId.current += 1;
+                    detailExecutionId.current = null;
+                    setSelectedExecution(null);
+                  }}>
                     Close
                   </Button>
                 </Space>

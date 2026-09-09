@@ -1,4 +1,5 @@
 import axios, { InternalAxiosRequestConfig } from 'axios';
+import { listenForWorkflowProgress, type WorkflowProgress } from './services/workflows/progress';
 
 let accessToken: string | null = null;
 
@@ -213,7 +214,10 @@ export async function getSystemSettings() {
   return res.data;
 }
 
-export async function updateSystemSettings(payload: { auto_approve_enabled?: boolean }) {
+export async function updateSystemSettings(payload: {
+  auto_approve_enabled?: boolean;
+  workflow_http_allowlist?: string[];
+}) {
   const res = await client.put('/accounts/system-settings/', payload);
   return res.data;
 }
@@ -1102,9 +1106,7 @@ export interface Workflow {
   name: string;
   description: string;
   trigger_type: string;
-  // Execution engine for this workflow.
-  // - 'local'   : runs in-process via the Django engine (default).
-  // - 'prefect' : delegated to a Prefect flow run; status is polled from Prefect.
+  // New workflows use Prefect; 'local' is returned only for legacy records.
   execution_engine?: 'local' | 'prefect';
   trigger_conditions: Record<string, any>;
   schedule_cron?: string;
@@ -1147,6 +1149,7 @@ export interface WorkflowExecution {
   id: string;
   workflow: string;
   workflow_name: string;
+  workflow_version: number;
   trigger_source: string;
   trigger_data: Record<string, any>;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
@@ -1283,13 +1286,17 @@ export async function getWorkflow(id: string): Promise<Workflow> {
 }
 
 // Create workflow
-export async function createWorkflow(data: Partial<Workflow>): Promise<Workflow> {
+type WorkflowWritePayload = Omit<Partial<Workflow>, 'execution_engine'> & {
+  execution_engine?: 'prefect';
+};
+
+export async function createWorkflow(data: WorkflowWritePayload): Promise<Workflow> {
   const r = await client.post(`${WORKFLOWS_BASE}/workflows/`, data);
   return r.data;
 }
 
 // Update workflow
-export async function updateWorkflow(id: string, data: Partial<Workflow>): Promise<Workflow> {
+export async function updateWorkflow(id: string, data: WorkflowWritePayload): Promise<Workflow> {
   const r = await client.put(`${WORKFLOWS_BASE}/workflows/${id}/`, data);
   return r.data;
 }
@@ -1351,6 +1358,15 @@ export async function activateWorkflow(id: string): Promise<void> {
 // Deactivate workflow
 export async function deactivateWorkflow(id: string): Promise<void> {
   await client.post(`${WORKFLOWS_BASE}/workflows/${id}/deactivate/`);
+}
+
+// Subscribe before reloading snapshots so changes during a disconnect are covered.
+export function subscribeWorkflowProgress(onProgress: (progress: WorkflowProgress | null) => void): () => void {
+  return listenForWorkflowProgress(
+    `${resolveApiBase()}${WORKFLOWS_BASE}/executions/events/`,
+    () => accessToken,
+    onProgress,
+  );
 }
 
 // List executions
@@ -1458,38 +1474,6 @@ export async function exportWorkflow(id: string): Promise<{ blob: Blob; filename
   };
 }
 
-/*
- * Intentionally disabled rather than deleted. Importing server-local manifests
- * was a disaster-recovery path, but recovery is out of scope and restored DB
- * UUIDs can diverge from manifest pointer UUIDs. Normal transfers use JSON files.
- *
-export async function listPublishedManifests(): Promise<{ manifests: Array<{
-  filename: string;
-  slug: string;
-  name: string;
-  description: string;
-  steps_count: number;
-  published_at: string;
-  version: number;
-  trigger_type: string;
-  tags: string[];
-  has_flow_file: boolean;
-}> }> {
-  const r = await client.get(`${WORKFLOWS_BASE}/publish/manifests/`);
-  return r.data;
-}
-
-// Import workflow from manifest file, uploaded file, or JSON payload
-export async function importWorkflowFromManifest(filename: string): Promise<{
-  status: string;
-  source: string;
-  workflow_id: string;
-  workflow_name: string;
-}> {
-  const r = await client.post(`${WORKFLOWS_BASE}/import/`, { filename });
-  return r.data;
-}
-*/
 
 // Import workflow from uploaded JSON file
 export async function importWorkflowFromFile(file: File): Promise<{

@@ -48,6 +48,7 @@ async function proxy(request: Request, ctx: any) {
       body: body as any,
       redirect: 'manual',
       cache: 'no-store',
+      signal: request.signal,
     });
   }
 
@@ -59,6 +60,7 @@ async function proxy(request: Request, ctx: any) {
       res = await doFetch(url);
       break;
     } catch {
+      if (request.signal.aborted) break;
       // try next origin
     }
   }

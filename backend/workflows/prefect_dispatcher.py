@@ -1,226 +1,337 @@
-"""
-Prefect dispatcher: bridge between Django ``WorkflowExecution`` records and
-Prefect flow runs.
-"""
+"""Django-side bridge to Prefect and the independent worker runtime."""
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
-from .models import StepExecution, Workflow, WorkflowExecution, WorkflowStep
 from . import prefect_client
+from .models import StepExecution, Workflow, WorkflowExecution, WorkflowSchedule
 
 logger = logging.getLogger(__name__)
 
 
-def _serialize_step(step: WorkflowStep) -> Dict[str, Any]:
-    action_config: Dict[str, Any] = {}
-    if step.action_template and step.action_template.default_config:
-        action_config.update(step.action_template.default_config)
-    action_config.update(step.action_config or {})
-    return {
-        'id': str(step.id),
-        'order': step.order,
-        'name': step.name,
-        'node_type': step.node_type,
-        'node_category': step.node_category,
-        'action_type': step.action_type,
-        # This is intentionally ciphertext. Prefect task parameters and
-        # generated manifests must never receive decrypted credentials.
-        'action_config': action_config,
-        'timeout_seconds': step.timeout_seconds,
-        'on_failure': step.on_failure,
-        'retry_count': step.retry_count,
-        'retry_delay_seconds': step.retry_delay_seconds,
-        'condition': step.condition or {},
-        'next_step_true': str(step.next_step_true) if step.next_step_true else None,
-        'next_step_false': str(step.next_step_false) if step.next_step_false else None,
-        'connections': list(step.connections or []),
-        'is_active': step.is_active,
-    }
+def build_run_envelope(
+    workflow: Workflow,
+    *,
+    execution_id: str | None,
+    trigger_source: str,
+    trigger_data: Dict[str, Any],
+    workflow_version: int | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    from .publisher import load_current_published_manifest, load_published_manifest
 
-
-def _serialize_workflow(workflow: Workflow) -> Dict[str, Any]:
-    steps = list(workflow.steps.filter(is_active=True).order_by('order'))
-    return {
-        'id': str(workflow.id),
-        'name': workflow.name,
-        'description': workflow.description,
-        'trigger_type': workflow.trigger_type,
-        'edges': workflow.edges or [],
-        'steps': [_serialize_step(step) for step in steps],
+    if workflow_version is None:
+        pointer, definition = load_current_published_manifest(workflow)
+        workflow_version = int(pointer['current_version'])
+    else:
+        definition = load_published_manifest(workflow, workflow_version)
+        meta = definition['_meta']
+        pointer = {
+            'current_version': workflow_version,
+            'published_at': meta.get('published_at'),
+        }
+    run = {
+        'schema_version': 1,
+        'execution_id': execution_id,
+        'workflow': {
+            'id': str(workflow.id),
+            'version': workflow_version,
+            'definition': definition,
+        },
+        'trigger': {
+            'source': trigger_source or 'manual',
+            'data': trigger_data or {},
+        },
     }
+    if any(step.get('action_type') in {'create_ticket', 'update_ticket', 'api_call'} for step in definition['steps']):
+        from .worker_credentials import sync_worker_credential
+
+        run['worker_credential_block'] = sync_worker_credential()
+    return run, pointer, definition
 
 
 def submit(execution: WorkflowExecution) -> WorkflowExecution:
-    from .publisher import load_manifest_definition_by_ref, resolve_manifest_metadata
-
     try:
-        pointer = resolve_manifest_metadata(execution.workflow)
-        manifest_filename = str(pointer.get('manifest_filename') or '').strip()
-        manifest_version = int(pointer.get('current_version') or 0)
-        manifest_ref = f"{execution.workflow.id}/{manifest_filename}"
-        manifest_definition = load_manifest_definition_by_ref(manifest_ref)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        logger.exception('Failed to resolve published manifest for workflow %s', execution.workflow.id)
-        execution.status = 'failed'
-        execution.error_message = f'Published manifest unavailable: {exc}'
-        execution.completed_at = timezone.now()
-        execution.save(update_fields=['status', 'error_message', 'completed_at'])
-        return execution
-
-    parameters = {
-        'manifest_ref': manifest_ref,
-        'execution_id': str(execution.id),
-        'trigger_data': execution.trigger_data or {},
-        'trigger_source': execution.trigger_source or 'manual',
-    }
-    flow_run_name = f"{execution.workflow.name} :: {execution.id}"
-    deployment_id = (execution.workflow.prefect_deployment_id or '').strip() or None
-
-    try:
-        result = prefect_client.create_flow_run(
-            parameters=parameters,
-            name=flow_run_name,
-            tags=['soar', f'workflow:{execution.workflow.id}'],
-            deployment_id=deployment_id,
+        run, pointer, definition = build_run_envelope(
+            execution.workflow,
+            execution_id=str(execution.id),
+            trigger_source=execution.trigger_source,
+            trigger_data=execution.trigger_data or {},
+            workflow_version=execution.workflow_version,
         )
-    except prefect_client.PrefectAPIError as exc:
-        logger.exception('Prefect rejected flow run for execution %s', execution.id)
-        execution.status = 'failed'
-        execution.error_message = f'Prefect dispatch failed: {exc}'
-        execution.completed_at = timezone.now()
-        execution.save(update_fields=['status', 'error_message', 'completed_at'])
+        result = prefect_client.create_flow_run(
+            parameters={'run': run},
+            name=f"{execution.workflow.name} :: {execution.id}",
+            tags=['soar', f'workflow:{execution.workflow.id}'],
+            deployment_id=(execution.workflow.prefect_deployment_id or '').strip() or None,
+            idempotency_key=str(execution.id),
+        )
+    except (OSError, ValueError, TypeError, KeyError, prefect_client.PrefectAPIError) as exc:
+        logger.exception('Failed to dispatch workflow execution %s', execution.id)
+        with transaction.atomic():
+            execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+            if execution.status == 'pending' and not execution.task_result_id and not execution.runtime_event_at:
+                execution.status = 'failed'
+                execution.error_message = f'Prefect dispatch failed: {exc}'
+                execution.completed_at = timezone.now()
+                execution.save(update_fields=['status', 'error_message', 'completed_at'])
         return execution
 
-    execution.task_result_id = str(result.get('id') or '')
-    execution.status = 'running'
-    execution.started_at = execution.started_at or timezone.now()
-    execution.total_steps = len(manifest_definition.get('steps', []) or [])
-    execution.context = {
-        **(execution.context or {}),
-        'manifest_ref': manifest_ref,
-        'manifest_version': manifest_version,
-        'published_at': pointer.get('published_at'),
-    }
-    execution.save(update_fields=['task_result_id', 'status', 'started_at', 'total_steps', 'context'])
-    logger.info('Submitted Prefect flow run %s for workflow execution %s', execution.task_result_id, execution.id)
+    # A fast worker may already have sent progress while create_flow_run returned.
+    with transaction.atomic():
+        execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+        execution.task_result_id = str(result.get('id') or '')
+        state = result.get('state') or {}
+        if not execution.runtime_event_at and execution.status == 'pending':
+            execution.status = prefect_client.map_state_to_status(state.get('type') or result.get('state_type'))
+        execution.total_steps = len(definition.get('steps') or [])
+        execution.context = {
+            **(execution.context or {}),
+            'workflow_version': execution.workflow_version,
+            'published_at': pointer.get('published_at'),
+        }
+        execution.save(update_fields=['task_result_id', 'status', 'total_steps', 'context'])
     return execution
 
 
 def cancel(execution: WorkflowExecution) -> WorkflowExecution:
-    """Forward a cancellation request to Prefect for the backing flow run.
-
-    The caller is responsible for updating the local ``WorkflowExecution``
-    row; this only propagates intent to Prefect. Idempotent when the flow run
-    is already terminal.
-    """
-    if not execution.task_result_id:
-        return execution
-    prefect_client.cancel_flow_run(execution.task_result_id)
-    logger.info('Requested Prefect cancel for flow run %s (execution %s)', execution.task_result_id, execution.id)
+    if execution.task_result_id:
+        prefect_client.cancel_flow_run(execution.task_result_id)
     return execution
 
 
-
-def sync_status(execution: WorkflowExecution) -> WorkflowExecution:
-    if not execution.task_result_id:
+@transaction.atomic
+def sync_status(execution: WorkflowExecution, *, force=False, occurred=None) -> WorkflowExecution:
+    execution = WorkflowExecution.objects.select_for_update().get(pk=execution.pk)
+    if not execution.task_result_id or execution.status == 'cancelled' or (
+        not force and execution.status in prefect_client.TERMINAL_STATUSES
+        and not (execution.status == 'failed' and not execution.error_message)
+    ):
         return execution
-    if execution.status in prefect_client.TERMINAL_STATUSES:
+    # Let callers retry transport failures; a consumer must not checkpoint a
+    # native terminal event whose current state could not be read.
+    flow_run = prefect_client.get_flow_run(execution.task_result_id)
+    fields = ['status', 'started_at', 'completed_at', 'error_message', 'state_event_at']
+    before = [getattr(execution, field) for field in fields]
+    state = flow_run.get('state') or {}
+    status = prefect_client.map_state_to_status(state.get('type') or flow_run.get('state_type'))
+    state_time = (parse_datetime(state['timestamp']) if state.get('timestamp') else None) or occurred or timezone.now()
+    execution.state_event_at = state_time
+    execution.status = status
+    if status == 'running' and not execution.started_at:
+        execution.started_at = timezone.now()
+    if status in prefect_client.TERMINAL_STATUSES:
+        execution.completed_at = state_time
+    if status not in prefect_client.TERMINAL_STATUSES:
+        execution.completed_at = None
+    if status != 'failed':
+        execution.error_message = ''
+    if status == 'failed' and not execution.error_message:
+        execution.error_message = str(
+            state.get('message') or flow_run.get('state_name') or 'Prefect flow run failed.'
+        )
+    if before != [getattr(execution, field) for field in fields]:
+        execution.save(update_fields=fields)
+    return execution
+
+
+@transaction.atomic
+def register_runtime_execution(payload: Dict[str, Any]) -> WorkflowExecution:
+    from .publisher import load_published_manifest
+
+    flow_run_id = str(payload['prefect_flow_run_id'])
+    workflow_version = int(payload['workflow_version'])
+    workflow = Workflow.objects.get(id=payload['workflow_id'], execution_engine='prefect', is_active=True)
+    try:
+        definition = load_published_manifest(workflow, workflow_version)
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            f'Published workflow version {workflow_version} is unavailable or invalid.'
+        ) from exc
+
+    existing = WorkflowExecution.objects.select_for_update().filter(task_result_id=flow_run_id).first()
+    if existing:
+        if str(existing.workflow_id) != str(payload['workflow_id']):
+            raise ValueError('prefect_flow_run_id is already registered to another workflow')
+        if existing.workflow_version != workflow_version:
+            raise ValueError('prefect_flow_run_id is already registered to another workflow version')
+        return existing
+    try:
+        with transaction.atomic():
+            return WorkflowExecution.objects.create(
+                **({'id': payload['execution_id']} if payload.get('execution_id') else {}),
+                workflow=workflow,
+                workflow_version=workflow_version,
+                trigger_source=str(payload.get('trigger_source') or 'schedule'),
+                trigger_data=payload.get('trigger_data') or {},
+                task_result_id=flow_run_id,
+                status='pending',
+                total_steps=len(definition['steps']),
+                context={
+                    'workflow_version': workflow_version,
+                    'published_at': definition['_meta'].get('published_at'),
+                },
+            )
+    except IntegrityError:
+        existing = WorkflowExecution.objects.get(task_result_id=flow_run_id)
+        if str(existing.workflow_id) != str(payload['workflow_id']):
+            raise ValueError('prefect_flow_run_id is already registered to another workflow')
+        if existing.workflow_version != workflow_version:
+            raise ValueError('prefect_flow_run_id is already registered to another workflow version')
+        return existing
+
+
+@transaction.atomic
+def apply_runtime_snapshot(execution: WorkflowExecution, payload: Dict[str, Any], *, occurred=None) -> WorkflowExecution:
+    from .publisher import load_published_manifest
+
+    execution = WorkflowExecution.objects.select_for_update().select_related('workflow').get(pk=execution.pk)
+    flow_run_id = str(payload['prefect_flow_run_id'])
+    if execution.task_result_id and execution.task_result_id != flow_run_id:
+        raise ValueError('prefect_flow_run_id does not match this execution')
+    if not execution.task_result_id:
+        execution.task_result_id = flow_run_id
+    if occurred and execution.runtime_event_at and occurred <= execution.runtime_event_at:
+        return execution
+
+    incoming_status = str(payload['status'])
+    if execution.status == 'cancelled' and incoming_status != 'cancelled':
         return execution
 
     try:
-        flow_run = prefect_client.get_flow_run(execution.task_result_id)
-    except prefect_client.PrefectAPIError as exc:
-        logger.warning('Prefect sync failed for execution %s: %s', execution.id, exc)
-        return execution
+        definition = load_published_manifest(execution.workflow, execution.workflow_version)
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            f'Published workflow version {execution.workflow_version} is unavailable or invalid.'
+        ) from exc
+    manifest_steps = {
+        str(step['id']): step
+        for step in definition['steps']
+    }
+    terminal_step_statuses = {'completed', 'failed', 'skipped', 'cancelled'}
+    step_results = [
+        {**item, 'step_id': str(item['step_id'])}
+        for item in payload.get('step_results') or []
+    ]
+    for item in step_results:
+        step_id = str(item['step_id'])
+        manifest_step = manifest_steps.get(step_id)
+        if manifest_step is None:
+            raise ValueError(
+                f'step {step_id} does not belong to published workflow version {execution.workflow_version}'
+            )
+        status = str(item.get('status') or 'completed')
+        now = timezone.now()
+        started_at = parse_datetime(item['started_at']) if item.get('started_at') else None
+        completed_at = parse_datetime(item['completed_at']) if item.get('completed_at') else None
+        step_execution, created = StepExecution.objects.get_or_create(
+            workflow_execution=execution,
+            source_step_id=step_id,
+            defaults={
+                'step_name': manifest_step['name'],
+                'step_order': manifest_step['order'],
+                'action_type': manifest_step['action_type'],
+                'status': status,
+                'attempt_number': max(int(item.get('attempt_number') or 1), 1),
+                'started_at': started_at or occurred or now,
+                'completed_at': (completed_at or occurred or now) if status in terminal_step_statuses else None,
+                'input_data': item.get('input_data') or {},
+                'output_data': item.get('output_data') or {},
+                'error_message': item.get('error_message') or '',
+                'logs': item.get('logs') or '',
+            },
+        )
+        if not created:
+            values = {
+                'status': status,
+                'attempt_number': max(int(item.get('attempt_number') or 1), 1),
+                'started_at': started_at or step_execution.started_at or occurred or now,
+                'completed_at': (completed_at or step_execution.completed_at or occurred or now) if status in terminal_step_statuses else None,
+                'input_data': item.get('input_data') or {},
+                'output_data': item.get('output_data') or {},
+                'error_message': item.get('error_message') or '',
+                'logs': item.get('logs') or '',
+            }
+            changed = [key for key, value in values.items() if getattr(step_execution, key) != value]
+            if changed:
+                for key in changed:
+                    setattr(step_execution, key, values[key])
+                step_execution.save(update_fields=[*changed, 'updated_at'])
 
-    state = flow_run.get('state') or {}
-    state_type = state.get('type') or flow_run.get('state_type')
-    new_status = prefect_client.map_state_to_status(state_type)
-
-    update_fields = []
-    if execution.status != new_status:
-        execution.status = new_status
-        update_fields.append('status')
-
-    started = flow_run.get('start_time')
-    if started and not execution.started_at:
-        from django.utils.dateparse import parse_datetime
-        parsed = parse_datetime(started)
-        if parsed:
-            execution.started_at = parsed
-            update_fields.append('started_at')
-
-    if new_status in prefect_client.TERMINAL_STATUSES:
-        ended = flow_run.get('end_time')
-        if ended:
-            from django.utils.dateparse import parse_datetime
-            parsed = parse_datetime(ended)
-            if parsed:
-                execution.completed_at = parsed
-                update_fields.append('completed_at')
-        elif not execution.completed_at:
-            execution.completed_at = timezone.now()
-            update_fields.append('completed_at')
-
-        if new_status == 'failed':
-            message = state.get('message') or flow_run.get('state_name') or ''
-            if message and not execution.error_message:
-                execution.error_message = str(message)[:5000]
-                update_fields.append('error_message')
-
-    if update_fields:
-        execution.save(update_fields=list(set(update_fields)))
-
-    _sync_step_executions(execution, flow_run)
+    # Native state and custom snapshots can arrive in either order. Preserve a
+    # newer native state while still accepting delayed detailed step results.
+    newer_native_state = occurred and execution.state_event_at and occurred <= execution.state_event_at
+    if not newer_native_state:
+        execution.status = incoming_status
+    execution.started_at = execution.started_at or occurred or timezone.now()
+    execution.current_step = max(int(payload.get('current_step') or 0), 0)
+    execution.total_steps = len(definition['steps'])
+    execution.completed_steps = execution.step_executions.filter(status__in=terminal_step_statuses).count()
+    execution.update_progress()
+    execution.context = {
+        **(payload.get('context') or {}),
+        'workflow_version': execution.workflow_version,
+    }
+    execution.error_message = payload.get('error_message') or (execution.error_message if execution.status == 'failed' else '')
+    if incoming_status in prefect_client.TERMINAL_STATUSES:
+        if not newer_native_state:
+            execution.completed_at = occurred or execution.completed_at or timezone.now()
+        execution.result_data = {
+            'execution_id': str(execution.id),
+            'status': execution.status,
+            'step_results': step_results,
+        }
+        if incoming_status == 'completed':
+            execution.completed_steps = execution.total_steps
+            execution.update_progress()
+    if occurred:
+        execution.runtime_event_at = occurred
+    execution.save()
     return execution
 
 
-def _sync_step_executions(execution: WorkflowExecution, flow_run: Dict[str, Any]) -> None:
-    payload: Dict[str, Any] = {}
-    for key in ('result', 'parameters'):
-        candidate = flow_run.get(key)
-        if isinstance(candidate, dict) and 'step_results' in candidate:
-            payload = candidate
-            break
+def schedule_slug(schedule: WorkflowSchedule) -> str:
+    return f'argus-workflow-{schedule.workflow_id}-{schedule.id}'
 
-    step_results = payload.get('step_results')
-    if not isinstance(step_results, list):
+
+def _schedule_definition(schedule: WorkflowSchedule) -> Dict[str, Any]:
+    if schedule.schedule_type == 'interval':
+        return {'interval': schedule.interval_seconds or 0}
+    return {'cron': schedule.cron or '', 'timezone': schedule.timezone or 'UTC'}
+
+
+def sync_schedule(schedule: WorkflowSchedule) -> Dict[str, Any]:
+    workflow = schedule.workflow
+    if workflow.execution_engine != 'prefect':
+        return {}
+    deployment_override = (workflow.prefect_deployment_id or '').strip() or None
+    if not prefect_client.is_configured(deployment_override):
+        return {}
+    deployment_id = prefect_client.resolve_deployment_id(deployment_override)
+    run, _, _ = build_run_envelope(
+        workflow,
+        execution_id=None,
+        trigger_source=schedule.trigger_source or 'schedule',
+        trigger_data=schedule.trigger_data or {},
+    )
+    return prefect_client.upsert_deployment_schedule(
+        deployment_id=deployment_id,
+        slug=schedule_slug(schedule),
+        schedule=_schedule_definition(schedule),
+        is_active=bool(schedule.is_active),
+        parameters={'run': run},
+    )
+
+
+def delete_schedule(schedule: WorkflowSchedule) -> None:
+    workflow = schedule.workflow
+    if workflow.execution_engine != 'prefect' or not prefect_client.is_configured((workflow.prefect_deployment_id or '').strip() or None):
         return
-
-    completed_count = 0
-    for entry in step_results:
-        if not isinstance(entry, dict):
-            continue
-        step_id = entry.get('step_id')
-        if not step_id:
-            continue
-        try:
-            step = WorkflowStep.objects.get(id=step_id, workflow=execution.workflow)
-        except WorkflowStep.DoesNotExist:
-            continue
-
-        defaults = {
-            'status': entry.get('status') or 'completed',
-            'attempt_number': int(entry.get('attempt_number') or 1),
-            'output_data': entry.get('output_data') or {},
-            'input_data': entry.get('input_data') or {},
-            'error_message': entry.get('error_message') or '',
-            'logs': entry.get('logs') or '',
-            'completed_at': timezone.now(),
-        }
-        StepExecution.objects.update_or_create(
-            workflow_execution=execution,
-            step=step,
-            defaults=defaults,
-        )
-        if defaults['status'] in ('completed', 'skipped'):
-            completed_count += 1
-
-    if completed_count:
-        execution.completed_steps = completed_count
-        execution.update_progress()
-        execution.save(update_fields=['completed_steps', 'progress_percent'])
+    prefect_client.delete_deployment_schedule_by_slug(
+        deployment_id=prefect_client.resolve_deployment_id((workflow.prefect_deployment_id or '').strip() or None),
+        slug=schedule_slug(schedule),
+    )

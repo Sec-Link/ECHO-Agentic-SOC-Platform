@@ -62,15 +62,17 @@ class Command(BaseCommand):
             if secured != (item.action_config or {}):
                 changes.append((SavedWorkflowNode, item.pk, "action_config", secured))
 
-        for item in StepExecution.objects.select_related("step").all().iterator():
+        for item in StepExecution.objects.all().iterator():
             current = item.input_data or {}
+            if not isinstance(current, dict):
+                continue
             if isinstance(current.get("action_config"), dict):
                 secured = dict(current)
                 secured["action_config"] = self._secure(
-                    item.step.action_type, current["action_config"], rotate
+                    item.action_type, current["action_config"], rotate
                 )
             else:
-                secured = self._secure(item.step.action_type, current, rotate)
+                secured = self._secure(item.action_type, current, rotate)
             if secured != current:
                 changes.append((StepExecution, item.pk, "input_data", secured))
         return changes

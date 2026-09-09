@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
+import re
+
+import idna
+
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
@@ -165,7 +170,44 @@ class AuditLogListSerializer(serializers.ModelSerializer):
 
 
 class SystemSettingsSerializer(serializers.ModelSerializer):
+    def validate_workflow_http_allowlist(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Must be a list of hostnames, IP addresses, or CIDRs.")
+        normalized = []
+        seen = set()
+        for raw in value:
+            if not isinstance(raw, str):
+                raise serializers.ValidationError("Each allowlist entry must be a string.")
+            entry = raw.strip()
+            if not entry or "*" in entry or "://" in entry or "@" in entry or any(char.isspace() for char in entry):
+                raise serializers.ValidationError(f"Invalid allowlist entry: {raw!r}.")
+            try:
+                parsed = ipaddress.ip_network(entry, strict=False) if "/" in entry else ipaddress.ip_address(entry)
+                canonical = str(parsed)
+            except ValueError:
+                if re.fullmatch(r"[0-9.]+", entry) or ":" in entry:
+                    raise serializers.ValidationError(f"Invalid IP address: {entry}.")
+                try:
+                    canonical = idna.encode(entry.rstrip("."), uts46=True).decode("ascii").lower()
+                except idna.IDNAError as exc:
+                    raise serializers.ValidationError(f"Invalid hostname: {entry}.") from exc
+                labels = canonical.split(".")
+                if (
+                    len(canonical) > 253
+                    or not labels
+                    or any(
+                        len(label) > 63
+                        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+                        for label in labels
+                    )
+                ):
+                    raise serializers.ValidationError(f"Invalid hostname: {entry}.")
+            if canonical not in seen:
+                seen.add(canonical)
+                normalized.append(canonical)
+        return normalized
+
     class Meta:
         model = SystemSettings
-        fields = ("auto_approve_enabled", "updated_at")
+        fields = ("auto_approve_enabled", "workflow_http_allowlist", "updated_at")
         read_only_fields = ("updated_at",)

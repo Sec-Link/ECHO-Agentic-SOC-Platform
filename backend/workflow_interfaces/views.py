@@ -119,6 +119,7 @@ def _verify_hmac_if_enabled(endpoint: InterfaceEndpoint, request) -> bool:
 def dispatch_interface_payload(endpoint: InterfaceEndpoint, payload, trigger_source='interface:ingest'):
     workflow_qs = Workflow.objects.filter(
         is_active=True,
+        execution_engine='prefect',
         trigger_type='webhook',
         trigger_conditions__webhook_source_id=str(endpoint.id),
     )

@@ -356,10 +356,6 @@ class WorkflowCreateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id']
 
-    def validate(self, attrs):
-        attrs['execution_engine'] = attrs.get('execution_engine') or getattr(self.instance, 'execution_engine', 'local')
-        return attrs
-
     @staticmethod
     def _to_uuid_or_none(value):
         import uuid as uuid_module
@@ -467,15 +463,16 @@ class WorkflowCreateSerializer(serializers.ModelSerializer):
 
 class StepExecutionSerializer(SensitiveConfigRepresentationMixin, serializers.ModelSerializer):
     """Serializer for StepExecution model."""
-    step_name = serializers.CharField(source='step.name', read_only=True)
-    step_order = serializers.IntegerField(source='step.order', read_only=True)
-    action_type = serializers.CharField(source='step.action_type', read_only=True)
+    step = serializers.UUIDField(source='source_step_id', read_only=True)
+    step_name = serializers.CharField(read_only=True)
+    step_order = serializers.IntegerField(read_only=True)
+    action_type = serializers.CharField(read_only=True)
     duration_seconds = serializers.SerializerMethodField()
     configured_secret_fields = serializers.ListField(child=serializers.CharField(), read_only=True)
     sensitive_config_field = 'input_data'
 
     def _representation_action_type(self, obj):
-        return getattr(getattr(obj, 'step', None), 'action_type', '') or ''
+        return obj.action_type or ''
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -518,13 +515,14 @@ class WorkflowExecutionListSerializer(serializers.ModelSerializer):
         model = WorkflowExecution
         fields = [
             'id', 'workflow', 'workflow_name', 'trigger_source', 'status',
+            'workflow_version',
             'current_step', 'total_steps', 'completed_steps', 'progress_percent',
             'started_at', 'completed_at', 'duration',
             'executed_by', 'executed_by_username',
             'task_result_id',
             'created_at',
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'workflow_version', 'created_at']
 
     def get_duration(self, obj):
         return obj.get_duration_display()
@@ -545,6 +543,7 @@ class WorkflowExecutionDetailSerializer(serializers.ModelSerializer):
         model = WorkflowExecution
         fields = [
             'id', 'workflow', 'workflow_name', 'trigger_source', 'trigger_data',
+            'workflow_version',
             'status', 'current_step', 'total_steps', 'completed_steps',
             'progress_percent', 'started_at', 'completed_at', 'duration',
             'duration_seconds', 'result_data', 'error_message', 'context',
@@ -553,7 +552,7 @@ class WorkflowExecutionDetailSerializer(serializers.ModelSerializer):
             'step_executions',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'workflow_version', 'created_at', 'updated_at']
 
     def get_duration(self, obj):
         return obj.get_duration_display()
@@ -567,6 +566,37 @@ class WorkflowExecuteSerializer(serializers.Serializer):
     trigger_data = serializers.JSONField(required=False, default=dict)
     trigger_source = serializers.CharField(required=False, default='manual')
     confirm_mass_update = serializers.BooleanField(required=False, default=False)
+
+
+class RuntimeRegistrationSerializer(serializers.Serializer):
+    workflow_id = serializers.UUIDField()
+    workflow_version = serializers.IntegerField(min_value=1)
+    prefect_flow_run_id = serializers.UUIDField()
+    trigger_source = serializers.CharField(required=False, default='schedule')
+    trigger_data = serializers.JSONField(required=False, default=dict)
+    total_steps = serializers.IntegerField(min_value=0)
+
+
+class RuntimeStepResultSerializer(serializers.Serializer):
+    step_id = serializers.UUIDField()
+    status = serializers.ChoiceField(choices=[choice[0] for choice in StepExecution.STATUS_CHOICES])
+    attempt_number = serializers.IntegerField(min_value=1, required=False, default=1)
+    input_data = serializers.JSONField(required=False, default=dict)
+    output_data = serializers.JSONField(required=False, default=dict)
+    error_message = serializers.CharField(required=False, allow_blank=True, default='')
+    logs = serializers.CharField(required=False, allow_blank=True, default='')
+    started_at = serializers.DateTimeField(required=False, allow_null=True)
+    completed_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class RuntimeSnapshotSerializer(serializers.Serializer):
+    prefect_flow_run_id = serializers.UUIDField()
+    status = serializers.ChoiceField(choices=[choice[0] for choice in WorkflowExecution.STATUS_CHOICES])
+    current_step = serializers.IntegerField(min_value=0)
+    total_steps = serializers.IntegerField(min_value=0)
+    context = serializers.JSONField(required=False, default=dict)
+    error_message = serializers.CharField(required=False, allow_blank=True, default='')
+    step_results = RuntimeStepResultSerializer(many=True, required=False, default=list)
 
 
 class SavedWorkflowNodeSerializer(SensitiveConfigRepresentationMixin, serializers.ModelSerializer):

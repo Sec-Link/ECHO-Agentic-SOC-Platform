@@ -149,6 +149,7 @@ class AuditLog(models.Model):
 
 class SystemSettings(models.Model):
     auto_approve_enabled = models.BooleanField(default=True)
+    workflow_http_allowlist = models.JSONField(default=list, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

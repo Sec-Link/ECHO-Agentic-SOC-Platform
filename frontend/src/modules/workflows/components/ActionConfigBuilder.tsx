@@ -29,6 +29,7 @@ import {
   PlusOutlined,
 } from '@ant-design/icons';
 import type { ActionInfo } from 'services/workflows';
+import ApiCallConfigBuilder from './ApiCallConfigBuilder';
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -320,16 +321,12 @@ const ActionConfigBuilder: React.FC<ActionConfigBuilderProps> = ({
     const values = { ...inputValues };
     const initial = initialTargets.current;
     const apiUrlChanged = normalizeTargetValue(values.api_url) !== initial.api_url;
-    const webhookUrlChanged = normalizeTargetValue(values.url) !== initial.url;
     const providerChanged = (
       String(values.provider || 'generic').toLowerCase() !== initial.provider
     );
     const isOPNsenseAction = actionType === 'block_ip' || actionType === 'release_ip';
-    const protectedChanged = configuredSecretFields.length > 0 && (
-      actionType === 'send_webhook'
-        ? webhookUrlChanged
-        : apiUrlChanged || (isOPNsenseAction && providerChanged)
-    );
+    const protectedChanged = configuredSecretFields.length > 0
+      && (apiUrlChanged || (isOPNsenseAction && providerChanged));
     const nextAliasChanged = (
       isOPNsenseAction
       && configuredSecretFields.some((field) => field === 'api_key' || field === 'api_secret')
@@ -338,9 +335,6 @@ const ActionConfigBuilder: React.FC<ActionConfigBuilderProps> = ({
     setProtectedTargetChanged(protectedChanged);
     setAliasChanged(nextAliasChanged);
 
-    if (actionType === 'send_webhook' && protectedChanged && !values.headers) {
-      values.headers = null;
-    }
     if (isOPNsenseAction && values.provider === 'generic') {
       values.api_secret = null;
     }
@@ -408,6 +402,17 @@ const ActionConfigBuilder: React.FC<ActionConfigBuilderProps> = ({
     }
   };
 
+  if (actionType === 'api_call') {
+    return (
+      <ApiCallConfigBuilder
+        config={config}
+        configKey={configKey}
+        configuredSecretFields={configuredSecretFields}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (!schema?.properties) {
     return (
       <div>
@@ -460,11 +465,7 @@ const ActionConfigBuilder: React.FC<ActionConfigBuilderProps> = ({
               showIcon
               style={{ marginBottom: 16 }}
               message="Credential re-entry required"
-              description={
-                actionType === 'send_webhook'
-                  ? 'The webhook URL changed. Existing headers will not be reused; enter replacement headers or leave them empty to clear them.'
-                  : 'The Provider or API URL changed. Re-enter the API Key and, for OPNsense, the API Secret before saving.'
-              }
+              description="The Provider or API URL changed. Re-enter the API Key and, for OPNsense, the API Secret before saving."
             />
           )}
 
